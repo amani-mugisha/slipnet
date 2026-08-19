@@ -29,3 +29,7 @@ build_error.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime packet capture data
+data/*
+!data/.gitkeep

@@ -39,9 +39,6 @@ The project follows a modular architecture where individual engines collect and 
                   Network Intelligence
 ```
 
-The long-term goal is to make SlipNet a powerful, extensible platform for **network visibility, security analysis, and intelligent network monitoring**.
-
----
 
 ## Features
 
@@ -384,7 +381,7 @@ This approach allows each subsystem to become useful independently while also co
 
 ---
 
-# Roadmap
+# Project Phases Roadmap
 
 ## Phase 1 — Core Engine
 

@@ -484,42 +484,24 @@ bool CommandUtilities::requiresArgument(
     switch (type)
     {
         case CommandType::HOST_FIND:
-
         case CommandType::PORT_SCAN:
-
         case CommandType::SERVICE_DETECT:
-
             return true;
 
-
         case CommandType::IP_SEEK:
-
         case CommandType::TOPOLOGY_MAP:
-
         case CommandType::PACKET_CAPTURE:
-
         case CommandType::PACKET_INSPECT:
-
         case CommandType::NETWORK_MONITOR:
-
         case CommandType::NETWORK_SHOW:
-
         case CommandType::NETWORK_CLEAR:
-
         case CommandType::SECURITY_DETECT:
-
         case CommandType::AI_ANALYZE:
-
         case CommandType::SESSION_INFO:
-
         case CommandType::HELP:
-
         case CommandType::EXIT:
-
         case CommandType::UNKNOWN:
-
         default:
-
             return false;
     }
 }

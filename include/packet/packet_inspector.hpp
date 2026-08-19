@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "packet/packet.hpp"
@@ -13,6 +14,7 @@ public:
     ) const;
 
     void inspectFile(
-        const std::string& file
+        const std::string& file,
+        std::uint64_t packetId = 0
     ) const;
 };
