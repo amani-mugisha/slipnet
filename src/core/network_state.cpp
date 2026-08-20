@@ -1,6 +1,5 @@
 #include "core/network_state.hpp"
 
-
 void NetworkState::clear()
 {
     hosts.clear();
@@ -8,10 +7,7 @@ void NetworkState::clear()
     services.clear();
 }
 
-
-void NetworkState::addHost(
-    const HostInfo& host
-)
+void NetworkState::addHost(const HostInfo& host)
 {
     for (auto& existing : hosts)
     {
@@ -25,23 +21,18 @@ void NetworkState::addHost(
     hosts.push_back(host);
 }
 
-
 const std::vector<HostInfo>&
 NetworkState::getHosts() const
 {
     return hosts;
 }
 
-
-std::size_t
-NetworkState::getHostCount() const
+std::size_t NetworkState::getHostCount() const
 {
     return hosts.size();
 }
 
-
-std::size_t
-NetworkState::getOnlineHostCount() const
+std::size_t NetworkState::getOnlineHostCount() const
 {
     std::size_t count = 0;
 
@@ -56,7 +47,6 @@ NetworkState::getOnlineHostCount() const
     return count;
 }
 
-
 void NetworkState::addPort(
     const std::string& ip,
     const PortInfo& port
@@ -64,32 +54,31 @@ void NetworkState::addPort(
 {
     for (auto& host : host_ports)
     {
-        if (host.ip == ip)
+        if (host.ip != ip)
         {
-            for (auto& existing : host.ports)
-            {
-                if (existing.port == port.port)
-                {
-                    existing = port;
-                    return;
-                }
-            }
-
-            host.ports.push_back(port);
-            return;
+            continue;
         }
+
+        for (auto& existing : host.ports)
+        {
+            if (existing.port == port.port)
+            {
+                existing = port;
+                return;
+            }
+        }
+
+        host.ports.push_back(port);
+        return;
     }
 
+    HostPorts newHost;
 
-    HostPorts new_host;
+    newHost.ip = ip;
+    newHost.ports.push_back(port);
 
-    new_host.ip = ip;
-
-    new_host.ports.push_back(port);
-
-    host_ports.push_back(new_host);
+    host_ports.push_back(newHost);
 }
-
 
 const std::vector<PortInfo>&
 NetworkState::getPorts(
@@ -109,14 +98,24 @@ NetworkState::getPorts(
     return empty;
 }
 
-
 void NetworkState::addService(
     const ServiceInfo& service
 )
 {
+    for (auto& existing : services)
+    {
+        if (
+            existing.ip == service.ip &&
+            existing.port == service.port
+        )
+        {
+            existing = service;
+            return;
+        }
+    }
+
     services.push_back(service);
 }
-
 
 const std::vector<ServiceInfo>&
 NetworkState::getServices() const
