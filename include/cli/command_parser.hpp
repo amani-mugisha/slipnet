@@ -110,6 +110,51 @@ enum class CommandType
     SESSION_INFO,
 
     /*
+     * MAC address resolution
+     */
+    MAC_RESOLVE,
+
+    /*
+     * DNS resolution
+     */
+    DNS_RESOLVE,
+
+    /*
+     * Operating system fingerprinting
+     */
+    OS_FINGERPRINT,
+
+    /*
+     * Service banner grabbing
+     */
+    BANNER_GRAB,
+
+    /*
+     * IPv4 subnet calculation
+     */
+    SUBNET_CALC,
+
+    /*
+    * Vulnerability assessment
+    */
+    VULN_SCAN,
+
+    /*
+    * Credential security audit
+    */
+    CRED_CHECK,
+
+    /*
+    * TLS/SSL certificate audit
+    */
+    SSL_AUDIT,
+
+    /*
+    * Firewall / port filtering analysis
+    */
+    FIREWALL_PROBE,
+
+    /*
      * Help
      */
     HELP,

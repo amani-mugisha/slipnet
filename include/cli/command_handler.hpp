@@ -75,6 +75,42 @@ private:
         const ParsedCommand& command
     );
 
+    void handleMacResolve(
+    const ParsedCommand& command
+    );
+
+    void handleDnsResolve(
+        const ParsedCommand& command
+    );
+
+    void handleOSFingerprint(
+        const ParsedCommand& command
+    );
+
+    void handleBannerGrab(
+        const ParsedCommand& command
+    );
+
+    void handleSubnetCalc(
+        const ParsedCommand& command
+    );
+
+    void handleVulnScan(
+    const ParsedCommand& command
+    );
+
+    void handleCredCheck(
+        const ParsedCommand& command
+    );
+
+    void handleSSLAudit(
+        const ParsedCommand& command
+    );
+
+    void handleFirewallProbe(
+        const ParsedCommand& command
+    );
+
     void handleHelp();
 
     void handleExit();

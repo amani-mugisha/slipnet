@@ -281,6 +281,49 @@ CommandType CommandParser::identifyCommand(
         return CommandType::SESSION_INFO;
     }
 
+    if (normalized == "mac|:resolve")
+    {
+        return CommandType::MAC_RESOLVE;
+    }
+
+    if (normalized == "dns|:resolve")
+    {
+        return CommandType::DNS_RESOLVE;
+    }
+
+    if (normalized == "os|:fingerprint")
+    {
+        return CommandType::OS_FINGERPRINT;
+    }
+
+    if (normalized == "banner|:grab")
+    {
+        return CommandType::BANNER_GRAB;
+    }
+
+    if (normalized == "subnet|:calc")
+    {
+        return CommandType::SUBNET_CALC;
+    }
+    if (normalized == "vuln|:scan")
+    {
+        return CommandType::VULN_SCAN;
+    }
+
+    if (normalized == "cred|:check")
+    {
+        return CommandType::CRED_CHECK;
+    }
+
+    if (normalized == "ssl|:audit")
+    {
+        return CommandType::SSL_AUDIT;
+    }
+
+    if (normalized == "firewall|:probe")
+    {
+        return CommandType::FIREWALL_PROBE;
+    }
 
     /*
      * --------------------------------------------------------
@@ -455,6 +498,33 @@ std::string CommandUtilities::commandName(
         case CommandType::SESSION_INFO:
             return "session|:info";
 
+        case CommandType::MAC_RESOLVE:
+            return "mac|:resolve";
+
+        case CommandType::DNS_RESOLVE:
+            return "dns|:resolve";
+
+        case CommandType::OS_FINGERPRINT:
+            return "os|:fingerprint";
+
+        case CommandType::BANNER_GRAB:
+            return "banner|:grab";
+
+        case CommandType::SUBNET_CALC:
+            return "subnet|:calc";
+
+        case CommandType::VULN_SCAN:
+            return "vuln|:scan";
+
+        case CommandType::CRED_CHECK:
+            return "cred|:check";
+
+        case CommandType::SSL_AUDIT:
+            return "ssl|:audit";
+
+        case CommandType::FIREWALL_PROBE:
+            return "firewall|:probe";
+
 
         case CommandType::HELP:
             return "help";
@@ -487,6 +557,21 @@ bool CommandUtilities::requiresArgument(
         case CommandType::PORT_SCAN:
         case CommandType::SERVICE_DETECT:
             return true;
+
+        case CommandType::MAC_RESOLVE:
+        case CommandType::DNS_RESOLVE:
+        case CommandType::OS_FINGERPRINT:
+        case CommandType::BANNER_GRAB:
+        case CommandType::SUBNET_CALC:
+            return true;
+
+        case CommandType::SSL_AUDIT:
+        case CommandType::FIREWALL_PROBE:
+            return true;
+
+        case CommandType::VULN_SCAN:
+        case CommandType::CRED_CHECK:
+            return false;
 
         case CommandType::IP_SEEK:
         case CommandType::TOPOLOGY_MAP:
