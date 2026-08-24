@@ -155,6 +155,10 @@ enum class CommandType
     FIREWALL_PROBE,
 
     /*
+     * System
+     */
+    SYSTEM_INFO,
+    /*
      * Help
      */
     HELP,

@@ -9,21 +9,24 @@ class PacketCapture
 {
 public:
 
-    /*
-     * Capture packets from a Linux network interface.
-     *
-     * interfaceName:
-     *     Interface such as eth0, eth1.
-     *
-     * seconds:
-     *     Capture duration.
-     *
-     * filter:
-     *     ALL, TCP, UDP or ICMP.
-     */
     std::vector<Packet> capture(
         const std::string& interfaceName,
-        int seconds,
-        const std::string& filter = "ALL"
+        int durationSeconds,
+        const std::string& filter
+    ) const;
+
+private:
+
+    bool matchesFilter(
+        const Packet& packet,
+        const std::string& filter
+    ) const;
+
+    bool saveCapture(
+        const std::string& file,
+        const std::string& interfaceName,
+        int durationSeconds,
+        const std::string& filter,
+        const std::vector<Packet>& packets
     ) const;
 };

@@ -111,6 +111,10 @@ private:
         const ParsedCommand& command
     );
 
+    void handleSystemInfo(
+    const ParsedCommand& command
+    );
+
     void handleHelp();
 
     void handleExit();

@@ -1,19 +1,24 @@
 #include "cli/command_handler.hpp"
 #include <iomanip>
 #include "cli/signal_handler.hpp"
+#include "monitoring/network_monitor.hpp"
 #include "network/host_scanner.hpp"
 #include "network/network_discovery.hpp"
 #include "host/host_discovery.hpp"
 #include "port/port_scanner.hpp"
 #include "service/service_detector.hpp"
 #include "topology/topology_mapper.hpp"
+#include "platform/network.hpp"
 #include "packet/packet_capture.hpp"
 #include "packet/packet_inspector.hpp"
 #include "monitoring/network_monitor.hpp"
 #include "security/security_detector.hpp"
+#include "platform/route.hpp"
+#include "platform/topology.hpp"
 #include "ai/analyzer.hpp"
 #include <cstdlib>
 #include <fstream>
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -24,6 +29,8 @@
 #include "network/os_fingerprint.hpp"
 #include "network/banner_grabber.hpp"
 #include "network/subnet_calculator.hpp"
+#include "system/system_info.hpp"
+#include <arpa/inet.h>
 
 #include <iomanip>
 #include "security/security_detector.hpp"
@@ -145,6 +152,10 @@ bool CommandHandler::execute(
             handleFirewallProbe(command);
             break;
 
+        case CommandType::SYSTEM_INFO:
+        handleSystemInfo(command);
+        break;
+
         case CommandType::HELP:
             handleHelp();
             break;
@@ -189,6 +200,7 @@ DISCOVERY
 SCANNING
 ------------------------------------------------------------
   port|:scan <IP>
+  port|:scan <IP> <start-port> <end-port>
       Scan common TCP ports.
 
   port|:scan <IP> <start>-<end>
@@ -311,6 +323,9 @@ SYSTEM
   Ctrl+C
       Interrupt the current operation.
 
+  system|:info       
+      Display local system information
+
 ============================================================
 )";
 }
@@ -330,20 +345,14 @@ void CommandHandler::handleIpSeek(
     std::cout
         << "\n[*] Starting network discovery...\n";
 
-
     NetworkDiscovery discovery(
         context.network
     );
 
+    const bool success =
+        discovery.discover();
 
-    if (
-        discovery.discover()
-    )
-    {
-        std::cout
-            << "[+] Network discovery completed.\n";
-    }
-    else
+    if (!success)
     {
         std::cout
             << "[!] Network discovery failed or was interrupted.\n";
@@ -627,250 +636,237 @@ void CommandHandler::handleTopologyMap(
     const auto& hosts =
         context.network.getHosts();
 
-    std::cout
-        << "\n"
-        << "============================================================\n"
-        << "                    NETWORK TOPOLOGY\n"
-        << "============================================================\n\n";
+    /*
+     * ------------------------------------------------------------
+     * Require discovered network information.
+     * ------------------------------------------------------------
+     */
 
     if (hosts.empty())
     {
         std::cout
-            << "[!] No network information available.\n"
-            << "[*] Run ip|:seek or host|:find first.\n\n"
-            << "============================================================\n";
+            << "\n"
+            << "[!] No discovered hosts available.\n"
+            << "\n"
+            << "[*] Run:\n"
+            << "    ip|:seek\n"
+            << "\n"
+            << "[*] Then run:\n"
+            << "    topo|:map\n"
+            << "\n";
 
         return;
     }
 
     /*
-     * Try to determine the local address and default gateway.
+     * ------------------------------------------------------------
+     * Create topology mapper.
+     * ------------------------------------------------------------
      */
-    std::string localIP;
-    std::string gateway;
 
+    TopologyMapper mapper;
+
+    /*
+     * ------------------------------------------------------------
+     * Get local network interfaces.
+     *
+     * This is platform independent:
+     *
+     * Linux   -> network_linux.cpp
+     * Windows -> network_windows.cpp
+     * ------------------------------------------------------------
+     */
+
+    const auto interfaces =
+        slipnet::platform::getNetworkInterfaces();
+
+    /*
+     * ------------------------------------------------------------
+     * Get local topology information.
+     *
+     * Linux   -> topology_linux.cpp
+     * Windows -> topology_windows.cpp
+     * ------------------------------------------------------------
+     */
+
+    const auto topologyInfo =
+        slipnet::platform::getLocalTopologyInfo();
+
+    std::string localIP =
+        topologyInfo.localAddress;
+
+    const std::string gatewayIP =
+        topologyInfo.gatewayAddress;
+
+    /*
+     * ------------------------------------------------------------
+     * Add active local interfaces.
+     * ------------------------------------------------------------
+     */
+
+    for (const auto& interface : interfaces)
     {
-        FILE* pipe =
-            popen(
-                "ip route get 1.1.1.1 2>/dev/null",
-                "r"
-            );
-
-        if (pipe)
+        if (!interface.up)
         {
-            char buffer[512];
-
-            std::string output;
-
-            while (
-                fgets(
-                    buffer,
-                    sizeof(buffer),
-                    pipe
-                )
-            )
-            {
-                output += buffer;
-            }
-
-            pclose(pipe);
-
-            /*
-             * Extract local source address.
-             */
-            std::size_t srcPos =
-                output.find("src ");
-
-            if (srcPos != std::string::npos)
-            {
-                srcPos += 4;
-
-                std::size_t end =
-                    output.find(
-                        ' ',
-                        srcPos
-                    );
-
-                if (end == std::string::npos)
-                {
-                    end = output.size();
-                }
-
-                localIP =
-                    output.substr(
-                        srcPos,
-                        end - srcPos
-                    );
-            }
-
-            /*
-             * Extract gateway.
-             */
-            std::size_t viaPos =
-                output.find(" via ");
-
-            if (viaPos != std::string::npos)
-            {
-                viaPos += 5;
-
-                std::size_t end =
-                    output.find(
-                        ' ',
-                        viaPos
-                    );
-
-                if (end == std::string::npos)
-                {
-                    end = output.size();
-                }
-
-                gateway =
-                    output.substr(
-                        viaPos,
-                        end - viaPos
-                    );
-            }
+            continue;
         }
+
+        if (interface.ipv4Address.empty())
+        {
+            continue;
+        }
+
+        // Remember the primary local IPv4 address.
+        if (localIP.empty())
+        {
+            localIP = interface.ipv4Address;
+        }
+
+        Node node;
+
+        node.name =
+            interface.name;
+
+        node.address =
+            interface.ipv4Address;
+
+        node.type =
+            "LOCAL";
+
+        mapper.addNode(node);
     }
 
-    std::cout
-        << "LOCAL SYSTEM\n"
-        << "------------------------------------------------------------\n";
+    /*
+     * ------------------------------------------------------------
+     * Add discovered hosts.
+     * ------------------------------------------------------------
+     */
+
+    for (const auto& host : hosts)
+    {
+        if (!host.online)
+        {
+            continue;
+        }
+
+        /*
+         * Do not duplicate the local machine as a HOST node.
+         */
+        if (
+            !localIP.empty() &&
+            host.ip == localIP
+        )
+        {
+            continue;
+        }
+
+        /*
+         * Gateway gets a special topology role.
+         */
+        const bool isGateway =
+            !gatewayIP.empty() &&
+            host.ip == gatewayIP;
+
+        Node node;
+
+        node.name =
+            isGateway
+                ? "gateway"
+                : host.ip;
+
+        node.address =
+            host.ip;
+
+        node.type =
+            isGateway
+                ? "GATEWAY"
+                : "HOST";
+
+        mapper.addNode(node);
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * Connect local machine to gateway.
+     *
+     * This relationship is supported by actual routing
+     * information, so it is safe to represent.
+     * ------------------------------------------------------------
+     */
+
+    if (
+        !localIP.empty() &&
+        !gatewayIP.empty()
+    )
+    {
+        Edge edge;
+
+        edge.from =
+            localIP;
+
+        edge.to =
+            gatewayIP;
+
+        mapper.addEdge(edge);
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * Connect local machine to discovered hosts.
+     *
+     * These are logical relationships, NOT claims about
+     * physical switches or routers.
+     * ------------------------------------------------------------
+     */
 
     if (!localIP.empty())
     {
-        std::cout
-            << "  Local IP : "
-            << localIP
-            << "\n";
-    }
-    else
-    {
-        std::cout
-            << "  Local IP : unknown\n";
-    }
-
-    if (!gateway.empty())
-    {
-        std::cout
-            << "  Gateway  : "
-            << gateway
-            << "\n";
-    }
-    else
-    {
-        std::cout
-            << "  Gateway  : not detected\n";
-    }
-
-    std::cout
-        << "\nNETWORK GRAPH\n"
-        << "------------------------------------------------------------\n";
-
-    /*
-     * Local node.
-     */
-    std::cout
-        << "\n  [LOCAL] "
-        << (
-            localIP.empty()
-                ? "this-host"
-                : localIP
-        )
-        << "\n";
-
-    /*
-     * Gateway node.
-     */
-    if (!gateway.empty())
-    {
-        std::cout
-            << "      |\n"
-            << "      +---- [GATEWAY] "
-            << gateway
-            << "\n";
-    }
-
-    /*
-     * Discovered hosts.
-     */
-    for (std::size_t i = 0;
-         i < hosts.size();
-         ++i)
-    {
-        const auto& host =
-            hosts[i];
-
-        const bool last =
-            (i + 1 == hosts.size());
-
-        std::cout
-            << "      "
-            << (last ? "    " : "|   ")
-            << "\n"
-            << "      "
-            << (last ? "`---- " : "+---- ")
-            << "[HOST] "
-            << host.ip
-            << " ["
-            << host.status
-            << "]";
-
-        if (host.latency_ms > 0.0)
+        for (const auto& host : hosts)
         {
-            std::cout
-                << " "
-                << std::fixed
-                << std::setprecision(2)
-                << host.latency_ms
-                << " ms";
-        }
-
-        std::cout
-            << "\n";
-
-        const auto& ports =
-            context.network.getPorts(
-                host.ip
-            );
-
-        int openPorts = 0;
-
-        for (const auto& port : ports)
-        {
-            if (port.open)
+            if (!host.online)
             {
-                ++openPorts;
+                continue;
             }
-        }
 
-        if (openPorts > 0)
-        {
-            std::cout
-                << "      "
-                << (last ? "     " : "|    ")
-                << "    Open TCP ports: "
-                << openPorts
-                << "\n";
+            if (host.ip == localIP)
+            {
+                continue;
+            }
+
+            /*
+             * Avoid adding the gateway twice.
+             */
+            if (
+                !gatewayIP.empty() &&
+                host.ip == gatewayIP
+            )
+            {
+                continue;
+            }
+
+            Edge edge;
+
+            edge.from =
+                localIP;
+
+            edge.to =
+                host.ip;
+
+            mapper.addEdge(edge);
         }
     }
 
-    std::cout
-        << "\nLEGEND\n"
-        << "------------------------------------------------------------\n"
-        << "  [LOCAL]   SlipNet host\n"
-        << "  [GATEWAY] Default network gateway\n"
-        << "  [HOST]    Host discovered by SlipNet\n";
+    /*
+     * ------------------------------------------------------------
+     * Display topology.
+     * ------------------------------------------------------------
+     */
+
+    mapper.display();
 
     std::cout
         << "\n"
-        << "[+] Topology generated from current discovery state.\n"
-        << "[+] Hosts discovered: "
-        << hosts.size()
-        << "\n";
-
-    std::cout
-        << "============================================================\n";
+        << "[+] Topology mapping completed successfully.\n";
 }
 
 
@@ -878,8 +874,6 @@ void CommandHandler::handlePacketCapture(
     const ParsedCommand& command
 )
 {
-    PacketCapture capture;
-
     std::string interfaceName;
 
     int seconds = 10;
@@ -887,13 +881,44 @@ void CommandHandler::handlePacketCapture(
     std::string filter = "ALL";
 
     /*
-     * pkt|:capture
+     * ------------------------------------------------------------
+     * Arguments
      *
-     * Automatically detect interface.
+     * pkt|:capture
+     * pkt|:capture <interface>
+     * pkt|:capture <interface> <seconds>
+     * pkt|:capture <interface> <seconds> <filter>
+     * ------------------------------------------------------------
      */
+
+    if (command.arguments.size() > 3)
+    {
+        std::cout
+            << "\n[!] Too many arguments.\n"
+            << "\nUsage:\n"
+            << "  pkt|:capture\n"
+            << "  pkt|:capture <interface>\n"
+            << "  pkt|:capture <interface> <seconds>\n"
+            << "  pkt|:capture <interface> <seconds> <filter>\n"
+            << "\nFilters:\n"
+            << "  ALL\n"
+            << "  TCP\n"
+            << "  UDP\n"
+            << "  ICMP\n";
+
+        return;
+    }
+
+
+    /*
+     * ------------------------------------------------------------
+     * Interface
+     * ------------------------------------------------------------
+     */
+
     if (command.arguments.empty())
     {
-        NetworkMonitor monitor;
+        slipnet::monitoring::NetworkMonitor monitor;
 
         interfaceName =
             monitor.detectActiveInterface();
@@ -912,9 +937,13 @@ void CommandHandler::handlePacketCapture(
             command.arguments[0];
     }
 
+
     /*
-     * Duration.
+     * ------------------------------------------------------------
+     * Duration
+     * ------------------------------------------------------------
      */
+
     if (command.arguments.size() >= 2)
     {
         try
@@ -928,63 +957,99 @@ void CommandHandler::handlePacketCapture(
         {
             std::cout
                 << "\n[!] Invalid duration.\n"
+                << "[*] Duration must be an integer.\n"
                 << "[*] Example:\n"
                 << "    pkt|:capture eth1 10\n";
 
             return;
         }
-
-        if (
-            seconds <= 0 ||
-            seconds > 86400
-        )
-        {
-            std::cout
-                << "\n[!] Duration must be between "
-                << "1 and 86400 seconds.\n";
-
-            return;
-        }
     }
 
+    if (
+        seconds < 1 ||
+        seconds > 86400
+    )
+    {
+        std::cout
+            << "\n[!] Duration must be between "
+            << "1 and 86400 seconds.\n";
+
+        return;
+    }
+
+
     /*
-     * Filter.
+     * ------------------------------------------------------------
+     * Filter
+     * ------------------------------------------------------------
      */
+
     if (command.arguments.size() >= 3)
     {
         filter =
             command.arguments[2];
     }
 
-    /*
-     * Too many arguments.
-     */
-    if (command.arguments.size() > 3)
+
+    std::transform(
+        filter.begin(),
+        filter.end(),
+        filter.begin(),
+        [](unsigned char c)
+        {
+            return static_cast<char>(
+                std::toupper(c)
+            );
+        }
+    );
+
+
+    if (
+        filter != "ALL" &&
+        filter != "TCP" &&
+        filter != "UDP" &&
+        filter != "ICMP"
+    )
     {
         std::cout
-            << "\n[!] Too many arguments.\n"
-            << "\nUsage:\n"
-            << "  pkt|:capture\n"
-            << "  pkt|:capture <interface>\n"
-            << "  pkt|:capture <interface> <seconds>\n"
-            << "  pkt|:capture <interface> <seconds> <filter>\n";
+            << "\n[!] Unsupported filter: "
+            << filter
+            << '\n'
+            << "[*] Supported filters: "
+            << "ALL, TCP, UDP, ICMP\n";
 
         return;
     }
 
+
+    /*
+     * ------------------------------------------------------------
+     * Start capture
+     * ------------------------------------------------------------
+     */
+
     std::cout
-        << "\n[*] Starting packet capture...\n"
-        << "[+] Interface : "
+        << "\n============================================================\n"
+        << "                    PACKET CAPTURE\n"
+        << "============================================================\n"
+        << "\n"
+        << "  Interface : "
         << interfaceName
         << "\n"
-        << "[+] Duration  : "
+        << "  Duration  : "
         << seconds
         << " seconds\n"
-        << "[+] Filter    : "
+        << "  Filter    : "
         << filter
-        << "\n";
+        << "\n"
+        << "\n"
+        << "[*] Press Ctrl+C to stop the capture early.\n";
+
+
+    PacketCapture capture;
 
     SignalHandler::clearStop();
+
 
     const auto packets =
         capture.capture(
@@ -993,34 +1058,22 @@ void CommandHandler::handlePacketCapture(
             filter
         );
 
+
     SignalHandler::clearStop();
 
-    std::cout
-        << "\n============================================================\n"
-        << "                    CAPTURE SUMMARY\n"
-        << "============================================================\n";
 
-    std::cout
-        << "Interface       : "
-        << interfaceName
-        << "\n";
-
-    std::cout
-        << "Duration        : "
-        << seconds
-        << " seconds\n";
-
-    std::cout
-        << "Filter          : "
-        << filter
-        << "\n";
-
-    std::cout
-        << "Packets captured: "
-        << packets.size()
-        << "\n";
+    /*
+     * ------------------------------------------------------------
+     * Summary
+     * ------------------------------------------------------------
+     */
 
     std::uint64_t totalBytes = 0;
+
+    std::size_t tcpCount = 0;
+    std::size_t udpCount = 0;
+    std::size_t icmpCount = 0;
+    std::size_t otherCount = 0;
 
     for (const auto& packet : packets)
     {
@@ -1028,29 +1081,61 @@ void CommandHandler::handlePacketCapture(
             static_cast<std::uint64_t>(
                 packet.length
             );
+
+        if (packet.protocol == "TCP")
+        {
+            ++tcpCount;
+        }
+        else if (packet.protocol == "UDP")
+        {
+            ++udpCount;
+        }
+        else if (packet.protocol == "ICMP")
+        {
+            ++icmpCount;
+        }
+        else
+        {
+            ++otherCount;
+        }
     }
 
+
     std::cout
-        << "Total bytes     : "
+        << "\n"
+        << "------------------------------------------------------------\n"
+        << " Capture Statistics\n"
+        << "------------------------------------------------------------\n"
+        << "  Total packets : "
+        << packets.size()
+        << '\n'
+        << "  Total bytes   : "
         << totalBytes
-        << "\n";
+        << '\n'
+        << "  TCP           : "
+        << tcpCount
+        << '\n'
+        << "  UDP           : "
+        << udpCount
+        << '\n'
+        << "  ICMP          : "
+        << icmpCount
+        << '\n'
+        << "  Other         : "
+        << otherCount
+        << '\n'
+        << "------------------------------------------------------------\n";
 
     if (packets.empty())
     {
         std::cout
-            << "\n[!] No packets were captured.\n"
-            << "[*] This can happen when the interface is idle.\n";
+            << "\n[!] No matching IPv4 packets captured.\n";
     }
     else
     {
         std::cout
-            << "\n[+] Packet capture completed.\n"
-            << "[+] Capture saved to:\n"
-            << "    data/last_capture.txt\n";
+            << "\n[+] Packet capture completed successfully.\n";
     }
-
-    std::cout
-        << "============================================================\n";
 }
 
 
@@ -1166,139 +1251,141 @@ void CommandHandler::handleNetworkMonitor(
     const ParsedCommand& command
 )
 {
-    std::string interfaceName;
+    slipnet::monitoring::NetworkMonitor monitor;
 
-    int seconds = 0;
+    /*
+     * Supported:
+     *
+     * net|:monitor
+     * net|:monitor <interface>
+     * net|:monitor <interface> <interval>
+     */
 
+    if (command.arguments.size() > 2)
+    {
+        std::cout
+            << "\n[!] Too many arguments.\n"
+            << "\nUsage:\n"
+            << "  net|:monitor\n"
+            << "  net|:monitor <interface>\n"
+            << "  net|:monitor <interface> <interval>\n";
+
+        return;
+    }
 
     /*
      * --------------------------------------------------------
-     * Determine interface
+     * Interface
      * --------------------------------------------------------
-     *
-     * No argument:
-     *
-     *     net|:monitor
-     *
-     * Automatically detect active interface.
-     *
-     * With argument:
-     *
-     *     net|:monitor eth1
-     *
-     * Use the specified interface.
      */
 
-    NetworkMonitor monitor;
-
+    std::string interfaceName;
 
     if (command.arguments.empty())
     {
-        std::cout
-            << "\n[*] Detecting active network interface...\n";
-
-
         interfaceName =
             monitor.detectActiveInterface();
-
 
         if (interfaceName.empty())
         {
             std::cout
-                << "[!] No active network interface found.\n";
+                << "\n[!] Unable to detect an active network interface.\n";
 
             return;
         }
-
-
-        std::cout
-            << "[+] Active interface: "
-            << interfaceName
-            << "\n";
     }
     else
     {
         interfaceName =
             command.arguments[0];
-    }
 
-
-    /*
-     * --------------------------------------------------------
-     * Optional duration
-     * --------------------------------------------------------
-     *
-     * net|:monitor
-     * net|:monitor eth1
-     * net|:monitor eth1 30
-     */
-
-    if (
-        command.arguments.size() >= 2
-    )
-    {
-        try
-        {
-            seconds =
-                std::stoi(
-                    command.arguments[1]
-                );
-
-
-            if (seconds < 0)
-            {
-                std::cout
-                    << "[!] Duration cannot be negative.\n";
-
-                return;
-            }
-        }
-        catch (...)
+        if (interfaceName.empty())
         {
             std::cout
-                << "[!] Invalid duration.\n"
-                << "[*] Example:\n"
-                << "    net|:monitor eth1 30\n";
+                << "\n[!] Network interface cannot be empty.\n";
 
             return;
         }
     }
 
-
     /*
-     * Reject unnecessary arguments.
+     * --------------------------------------------------------
+     * Sampling interval
+     * --------------------------------------------------------
      */
 
-    if (
-        command.arguments.size() > 2
-    )
-    {
-        std::cout
-            << "\nUsage:\n"
-            << "  net|:monitor\n"
-            << "  net|:monitor <interface>\n"
-            << "  net|:monitor <interface> <seconds>\n";
+    int intervalSeconds = 1;
 
-        return;
+    if (command.arguments.size() == 2)
+    {
+        try
+        {
+            std::size_t processed = 0;
+
+            intervalSeconds =
+                std::stoi(
+                    command.arguments[1],
+                    &processed
+                );
+
+            if (
+                processed !=
+                command.arguments[1].size()
+            )
+            {
+                throw std::invalid_argument(
+                    "invalid interval"
+                );
+            }
+        }
+        catch (...)
+        {
+            std::cout
+                << "\n[!] Invalid monitoring interval.\n"
+                << "[!] Interval must be a whole number of seconds.\n";
+
+            return;
+        }
+
+        if (
+            intervalSeconds < 1 ||
+            intervalSeconds > 3600
+        )
+        {
+            std::cout
+                << "\n[!] Monitoring interval must be between "
+                << "1 and 3600 seconds.\n";
+
+            return;
+        }
     }
 
-
     /*
      * --------------------------------------------------------
-     * Start monitoring
+     * Start monitor
      * --------------------------------------------------------
      */
 
-    SignalHandler::clearStop();
-
+    std::cout
+        << "\n"
+        << "============================================================\n"
+        << "                 SLIPNET NETWORK MONITOR\n"
+        << "============================================================\n"
+        << "\n"
+        << " Interface       : "
+        << interfaceName
+        << "\n"
+        << " Interval        : "
+        << intervalSeconds
+        << " second(s)\n"
+        << " Mode            : Continuous\n"
+        << " Stop            : Ctrl+C\n"
+        << "\n";
 
     monitor.monitor(
         interfaceName,
-        seconds
+        intervalSeconds
     );
-
-
-    SignalHandler::clearStop();
 }
 
 void CommandHandler::handleNetworkShow(
@@ -1311,49 +1398,180 @@ void CommandHandler::handleNetworkShow(
     const auto& services =
         context.network.getServices();
 
+    const std::size_t hostCount =
+        context.network.getHostCount();
+
+    const std::size_t onlineHostCount =
+        context.network.getOnlineHostCount();
+
+    std::size_t offlineHostCount = 0;
+
+    if (hostCount >= onlineHostCount)
+    {
+        offlineHostCount =
+            hostCount - onlineHostCount;
+    }
+
+    std::size_t openPortCount = 0;
+
+    for (const auto& host : hosts)
+    {
+        const auto& ports =
+            context.network.getPorts(host.ip);
+
+        for (const auto& port : ports)
+        {
+            if (port.open)
+            {
+                ++openPortCount;
+            }
+        }
+    }
+
+    /*
+     * ========================================================
+     * NETWORK STATE
+     * ========================================================
+     */
+
     std::cout
         << "\n"
         << "============================================================\n"
-        << "                    NETWORK STATE\n"
-        << "============================================================\n";
+        << "                     SLIPNET NETWORK STATE\n"
+        << "============================================================\n"
+        << "\n";
+
+    /*
+     * Summary
+     */
 
     std::cout
-        << "Hosts discovered : "
-        << context.network.getHostCount()
-        << '\n';
+        << "SUMMARY\n"
+        << "------------------------------------------------------------\n"
+        << " Hosts discovered : "
+        << hostCount
+        << '\n'
 
-    std::cout
-        << "Hosts online     : "
-        << context.network.getOnlineHostCount()
-        << '\n';
+        << " Hosts online     : "
+        << onlineHostCount
+        << '\n'
 
-    std::cout
-        << "Services         : "
+        << " Hosts offline    : "
+        << offlineHostCount
+        << '\n'
+
+        << " Open ports       : "
+        << openPortCount
+        << '\n'
+
+        << " Services         : "
         << services.size()
         << '\n';
 
+    /*
+     * ========================================================
+     * HOSTS
+     * ========================================================
+     */
+
     std::cout
-        << "\nHOSTS\n"
+        << "\n"
+        << "HOSTS\n"
         << "------------------------------------------------------------\n";
 
     if (hosts.empty())
     {
-        std::cout << "No hosts discovered.\n";
+        std::cout
+            << " No hosts discovered.\n";
     }
     else
     {
+        std::cout
+            << std::left
+            << std::setw(18) << "IP ADDRESS"
+            << std::setw(24) << "HOSTNAME"
+            << std::setw(12) << "STATUS"
+            << std::right
+            << std::setw(12) << "LATENCY"
+            << '\n';
+
+        std::cout
+            << "------------------------------------------------------------\n";
+
         for (const auto& host : hosts)
         {
+            std::string hostname =
+                host.hostname.empty()
+                    ? "-"
+                    : host.hostname;
+
+            std::string status;
+
+            if (host.online)
+            {
+                status = "ONLINE";
+            }
+            else if (!host.status.empty())
+            {
+                status = host.status;
+            }
+            else
+            {
+                status = "OFFLINE";
+            }
+
             std::cout
+                << std::left
+                << std::setw(18)
                 << host.ip
-                << "  "
-                << host.status
-                << "  "
+
+                << std::setw(24)
+                << hostname
+
+                << std::setw(12)
+                << status
+
+                << std::right
                 << std::fixed
                 << std::setprecision(2)
+                << std::setw(9)
                 << host.latency_ms
-                << " ms\n";
+                << " ms"
+                << '\n';
+        }
+    }
 
+    /*
+     * ========================================================
+     * OPEN PORTS
+     * ========================================================
+     */
+
+    std::cout
+        << "\n"
+        << "OPEN PORTS\n"
+        << "------------------------------------------------------------\n";
+
+    if (openPortCount == 0)
+    {
+        std::cout
+            << " No open ports detected.\n";
+    }
+    else
+    {
+        std::cout
+            << std::left
+            << std::setw(18) << "HOST"
+            << std::setw(10) << "PORT"
+            << std::setw(12) << "PROTOCOL"
+            << "SERVICE"
+            << '\n';
+
+        std::cout
+            << "------------------------------------------------------------\n";
+
+        for (const auto& host : hosts)
+        {
             const auto& ports =
                 context.network.getPorts(host.ip);
 
@@ -1365,56 +1583,105 @@ void CommandHandler::handleNetworkShow(
                 }
 
                 std::cout
-                    << "    "
+                    << std::left
+                    << std::setw(18)
+                    << host.ip
+
+                    << std::setw(10)
                     << port.port
-                    << "/"
-                    << port.protocol;
 
-                if (!port.service.empty())
-                {
-                    std::cout
-                        << "  "
-                        << port.service;
-                }
+                    << std::setw(12)
+                    << (
+                        port.protocol.empty()
+                            ? "-"
+                            : port.protocol
+                    )
 
-                std::cout << '\n';
+                    << (
+                        port.service.empty()
+                            ? "-"
+                            : port.service
+                    )
+
+                    << '\n';
             }
         }
     }
 
+    /*
+     * ========================================================
+     * SERVICES
+     * ========================================================
+     */
+
     std::cout
-        << "\nSERVICES\n"
+        << "\n"
+        << "DETECTED SERVICES\n"
         << "------------------------------------------------------------\n";
 
     if (services.empty())
     {
-        std::cout << "No services detected.\n";
+        std::cout
+            << " No services detected.\n";
     }
     else
     {
+        std::cout
+            << std::left
+            << std::setw(18) << "HOST"
+            << std::setw(10) << "PORT"
+            << std::setw(12) << "PROTOCOL"
+            << std::setw(20) << "SERVICE"
+            << "VERSION"
+            << '\n';
+
+        std::cout
+            << "------------------------------------------------------------\n";
+
         for (const auto& service : services)
         {
             std::cout
+                << std::left
+                << std::setw(18)
                 << service.ip
-                << "  "
+
+                << std::setw(10)
                 << service.port
-                << "/"
-                << service.protocol
-                << "  "
-                << service.service;
 
-            if (!service.version.empty())
-            {
-                std::cout
-                    << "  "
-                    << service.version;
-            }
+                << std::setw(12)
+                << (
+                    service.protocol.empty()
+                        ? "-"
+                        : service.protocol
+                )
 
-            std::cout << '\n';
+                << std::setw(20)
+                << (
+                    service.service.empty()
+                        ? "-"
+                        : service.service
+                )
+
+                << (
+                    service.version.empty()
+                        ? "-"
+                        : service.version
+                )
+
+                << '\n';
         }
     }
 
+    /*
+     * ========================================================
+     * END
+     * ========================================================
+     */
+
     std::cout
+        << "\n"
+        << "============================================================\n"
+        << " Network state displayed successfully.\n"
         << "============================================================\n";
 }
 
@@ -1423,17 +1690,110 @@ void CommandHandler::handleNetworkClear(
     const ParsedCommand&
 )
 {
+    const std::size_t hostsBefore =
+        context.network.getHostCount();
+
+    const std::size_t onlineBefore =
+        context.network.getOnlineHostCount();
+
+    const std::size_t servicesBefore =
+        context.network.getServices().size();
+
+    std::size_t openPortsBefore = 0;
+
+    /*
+     * Count open ports before clearing the state.
+     */
+    for (const auto& host :
+         context.network.getHosts())
+    {
+        const auto& ports =
+            context.network.getPorts(host.ip);
+
+        for (const auto& port : ports)
+        {
+            if (port.open)
+            {
+                ++openPortsBefore;
+            }
+        }
+    }
+
+    /*
+     * Clear all collected network intelligence.
+     */
     context.network.clear();
 
+    /*
+     * Verify that the state was actually cleared.
+     */
+    const bool cleared =
+        context.network.getHostCount() == 0 &&
+        context.network.getOnlineHostCount() == 0 &&
+        context.network.getServices().empty();
+
+    /*
+     * Display result.
+     */
     std::cout
         << "\n"
-        << "[+] Network state cleared.\n"
-        << "[+] Hosts, ports and services removed.\n";
+        << "============================================================\n"
+        << "                  SLIPNET NETWORK CLEAR\n"
+        << "============================================================\n"
+        << "\n";
+
+    if (!cleared)
+    {
+        std::cout
+            << "[!] Failed to completely clear network state.\n"
+            << "\n"
+            << "Please try again.\n"
+            << "\n"
+            << "============================================================\n";
+
+        return;
+    }
+
+    std::cout
+        << "[+] Network state cleared successfully.\n"
+        << "\n"
+
+        << "Cleared data\n"
+        << "------------------------------------------------------------\n"
+
+        << " Hosts           : "
+        << hostsBefore
+        << '\n'
+
+        << " Online hosts    : "
+        << onlineBefore
+        << '\n'
+
+        << " Open ports      : "
+        << openPortsBefore
+        << '\n'
+
+        << " Services        : "
+        << servicesBefore
+        << '\n'
+
+        << "\n"
+
+        << "Current state\n"
+        << "------------------------------------------------------------\n"
+
+        << " Hosts           : 0\n"
+        << " Open ports      : 0\n"
+        << " Services        : 0\n"
+
+        << "\n"
+
+        << "============================================================\n";
 }
 
 
 void CommandHandler::handleSecurityDetect(
-    const ParsedCommand&
+    const ParsedCommand& command
 )
 {
     const auto& hosts =
@@ -1443,47 +1803,128 @@ void CommandHandler::handleSecurityDetect(
         << "\n"
         << "============================================================\n"
         << "                 SLIPNET SECURITY ANALYSIS\n"
-        << "============================================================\n";
+        << "============================================================\n"
+        << "\n"
+        << " Mode        : Passive rule-based analysis\n"
+        << " Data source : SlipNet discovery state\n"
+        << " Probing     : Disabled\n"
+        << " Exploitation: Disabled\n";
 
-    if (hosts.empty())
+    /*
+     * --------------------------------------------------------
+     * Argument validation
+     * --------------------------------------------------------
+     */
+
+    if (command.arguments.size() > 1)
     {
         std::cout
-            << "\n[!] No discovered hosts available.\n"
-            << "\n[*] Security analysis uses information already\n"
-            << "    collected by SlipNet.\n"
-            << "\n[*] Run:\n"
-            << "    ip|:seek\n"
-            << "    port|:scan <IP>\n"
-            << "    svc|:detect <IP>\n"
+            << "\n[!] Invalid arguments.\n"
+            << "\nUsage:\n"
+            << "  sec|:detect\n"
+            << "  sec|:detect <IP>\n"
+            << "\n"
+            << "Examples:\n"
+            << "  sec|:detect\n"
+            << "  sec|:detect 192.168.1.10\n"
             << "\n"
             << "============================================================\n";
 
         return;
     }
 
+    if (hosts.empty())
+    {
+        std::cout
+            << "\n[!] No discovered hosts available.\n"
+            << "\n[*] Security analysis requires information\n"
+            << "    collected by SlipNet first.\n"
+            << "\n[*] Recommended sequence:\n"
+            << "    ip|:seek\n"
+            << "    port|:scan <IP>\n"
+            << "    svc|:detect <IP>\n"
+            << "    sec|:detect\n"
+            << "\n"
+            << "============================================================\n";
+
+        return;
+    }
+
+    /*
+     * --------------------------------------------------------
+     * Determine analysis scope
+     * --------------------------------------------------------
+     */
+
+    std::string targetIp;
+
+    if (!command.arguments.empty())
+    {
+        targetIp =
+            command.arguments[0];
+
+        bool discovered = false;
+
+        for (const auto& host : hosts)
+        {
+            if (host.ip == targetIp)
+            {
+                discovered = true;
+                break;
+            }
+        }
+
+        if (!discovered)
+        {
+            std::cout
+                << "\n[!] Host is not present in SlipNet's "
+                << "discovered network state.\n"
+                << "    IP: "
+                << targetIp
+                << "\n"
+                << "\n[*] Run ip|:seek first or use an IP "
+                << "already discovered by SlipNet.\n"
+                << "\n"
+                << "============================================================\n";
+
+            return;
+        }
+    }
+
     SecurityDetector detector;
 
+    std::size_t hostsAnalyzed = 0;
+    std::size_t hostsWithFindings = 0;
+
     std::size_t totalAlerts = 0;
-
     std::size_t highAlerts = 0;
-
     std::size_t mediumAlerts = 0;
-
     std::size_t lowAlerts = 0;
-
     std::size_t infoAlerts = 0;
+
+    /*
+     * --------------------------------------------------------
+     * Analyze hosts
+     * --------------------------------------------------------
+     */
 
     for (const auto& host : hosts)
     {
+        if (
+            !targetIp.empty() &&
+            host.ip != targetIp
+        )
+        {
+            continue;
+        }
+
+        ++hostsAnalyzed;
+
         const auto& ports =
             context.network.getPorts(
                 host.ip
             );
 
-        /*
-         * Collect services belonging to
-         * this particular host.
-         */
         std::vector<ServiceInfo> hostServices;
 
         for (
@@ -1499,10 +1940,6 @@ void CommandHandler::handleSecurityDetect(
             }
         }
 
-        /*
-         * Analyze only information already
-         * discovered by SlipNet.
-         */
         const auto alerts =
             detector.analyze(
                 host.ip,
@@ -1510,11 +1947,10 @@ void CommandHandler::handleSecurityDetect(
                 hostServices
             );
 
-        std::cout
-            << "\nHOST: "
-            << host.ip
-            << "\n"
-            << "------------------------------------------------------------\n";
+        if (!alerts.empty())
+        {
+            ++hostsWithFindings;
+        }
 
         int openPorts = 0;
 
@@ -1527,8 +1963,17 @@ void CommandHandler::handleSecurityDetect(
         }
 
         std::cout
+            << "\n"
+            << "HOST: "
+            << host.ip
+            << "\n"
+            << "------------------------------------------------------------\n"
             << "Status       : "
-            << host.status
+            << (
+                host.status.empty()
+                    ? (host.online ? "ONLINE" : "OFFLINE")
+                    : host.status
+            )
             << "\n"
             << "Open ports   : "
             << openPorts
@@ -1536,14 +1981,15 @@ void CommandHandler::handleSecurityDetect(
             << "Services     : "
             << hostServices.size()
             << "\n"
-            << "Alerts       : "
+            << "Findings     : "
             << alerts.size()
             << "\n";
 
         if (alerts.empty())
         {
             std::cout
-                << "\n[+] No rule-based security findings.\n";
+                << "\n"
+                << "[+] No rule-based security findings.\n";
 
             continue;
         }
@@ -1593,18 +2039,27 @@ void CommandHandler::handleSecurityDetect(
         }
     }
 
+    /*
+     * --------------------------------------------------------
+     * Summary
+     * --------------------------------------------------------
+     */
+
     std::cout
         << "\n"
         << "============================================================\n"
         << "                 SECURITY SUMMARY\n"
-        << "============================================================\n";
-
-    std::cout
+        << "============================================================\n"
+        << "\n"
         << "Hosts analyzed : "
-        << hosts.size()
+        << hostsAnalyzed
+        << "\n"
+        << "Hosts findings : "
+        << hostsWithFindings
         << "\n"
         << "Total findings : "
         << totalAlerts
+        << "\n"
         << "\n"
         << "High           : "
         << highAlerts
@@ -1622,17 +2077,20 @@ void CommandHandler::handleSecurityDetect(
     if (totalAlerts == 0)
     {
         std::cout
-            << "\n[+] No rule-based security findings detected.\n";
+            << "\n"
+            << "[+] No rule-based security findings detected.\n";
     }
     else
     {
         std::cout
-            << "\n[!] Security findings require review.\n"
-            << "[*] These findings are based on discovered\n"
-            << "    network exposure and are not proof of compromise.\n";
+            << "\n"
+            << "[!] Security findings require review.\n"
+            << "[*] Findings represent detected exposure patterns,\n"
+            << "    not proof of compromise or exploitable vulnerability.\n";
     }
 
     std::cout
+        << "\n"
         << "============================================================\n";
 }
 
@@ -2590,4 +3048,18 @@ void CommandHandler::handleFirewallProbe(
 
     std::cout
         << "============================================================\n";
+}
+
+void CommandHandler::handleSystemInfo(
+    const ParsedCommand& command
+)
+{
+    (void)command;
+
+    SystemInfoProvider provider;
+
+    const SystemInfo info =
+        provider.collect();
+
+    provider.display(info);
 }

@@ -1,26 +1,78 @@
 #include "port/port_scanner.hpp"
 
-#include <arpa/inet.h>
+#include "cli/signal_handler.hpp"
+#include "platform/tcp.hpp"
 
+#include <algorithm>
 #include <chrono>
-
-#include <fcntl.h>
-
 #include <future>
-
-#include <netinet/in.h>
-
-#include <sys/select.h>
-
-#include <sys/socket.h>
-
-#include <unistd.h>
-
+#include <iostream>
+#include <mutex>
+#include <thread>
 #include <vector>
 
-#include "cli/signal_handler.hpp"
+
+namespace
+{
+
+constexpr int CONNECTION_TIMEOUT_MS = 2000;
+constexpr std::size_t MAX_WORKERS = 64;
 
 
+/*
+ * Common TCP ports used by:
+ *
+ * port|:scan <host>
+ */
+const std::vector<int> COMMON_PORTS =
+{
+    21,      // FTP
+    22,      // SSH
+    23,      // Telnet
+    25,      // SMTP
+    53,      // DNS
+    80,      // HTTP
+    110,     // POP3
+    135,     // MS RPC
+    139,     // NetBIOS
+    143,     // IMAP
+    443,     // HTTPS
+    445,     // SMB
+    3306,    // MySQL
+    3389,    // RDP
+    5432,    // PostgreSQL
+    5900,    // VNC
+    6379,    // Redis
+    8080,    // HTTP alternate
+    8443     // HTTPS alternate
+};
+
+}
+
+
+/*
+ * ============================================================
+ * Check one TCP port
+ * ============================================================
+ *
+ * IMPORTANT:
+ *
+ * This file contains NO Linux socket code and NO Windows
+ * socket code.
+ *
+ * All platform-specific networking is handled through:
+ *
+ *     platform/tcp.hpp
+ *
+ * Linux:
+ *     tcp_linux.cpp
+ *
+ * Windows:
+ *     tcp_windows.cpp
+ *
+ * This keeps port|:scan portable.
+ * ============================================================
+ */
 bool PortScanner::checkPort(
     const std::string& host,
     int port,
@@ -30,110 +82,25 @@ bool PortScanner::checkPort(
     latencyMs = 0.0;
 
 
-    if (
-        SignalHandler::isStopRequested()
-    )
+    if (SignalHandler::isStopRequested())
     {
         return false;
     }
 
 
-    int socketFD =
-        socket(
-            AF_INET,
-            SOCK_STREAM,
-            0
-        );
-
-
-    if (socketFD < 0)
-    {
-        return false;
-    }
-
-
-    sockaddr_in address{};
-
-    address.sin_family = AF_INET;
-
-    address.sin_port =
-        htons(
-            static_cast<uint16_t>(
-                port
-            )
-        );
-
-
-    if (
-        inet_pton(
-            AF_INET,
-            host.c_str(),
-            &address.sin_addr
-        ) != 1
-    )
-    {
-        close(socketFD);
-
-        return false;
-    }
-
-
-    int flags =
-        fcntl(
-            socketFD,
-            F_GETFL,
-            0
-        );
-
-
-    fcntl(
-        socketFD,
-        F_SETFL,
-        flags | O_NONBLOCK
-    );
-
-
-    auto start =
+    const auto start =
         std::chrono::steady_clock::now();
 
 
-    connect(
-        socketFD,
-        reinterpret_cast<sockaddr*>(
-            &address
-        ),
-        sizeof(address)
-    );
-
-
-    fd_set writeSet;
-
-    FD_ZERO(&writeSet);
-
-    FD_SET(
-        socketFD,
-        &writeSet
-    );
-
-
-    timeval timeout{};
-
-    timeout.tv_sec = 0;
-
-    timeout.tv_usec = 500000;
-
-
-    int result =
-        select(
-            socketFD + 1,
-            nullptr,
-            &writeSet,
-            nullptr,
-            &timeout
+    slipnet::platform::TcpConnection connection =
+        slipnet::platform::tcpConnect(
+            host,
+            port,
+            CONNECTION_TIMEOUT_MS
         );
 
 
-    auto end =
+    const auto end =
         std::chrono::steady_clock::now();
 
 
@@ -143,109 +110,133 @@ bool PortScanner::checkPort(
         ).count();
 
 
-    bool open = false;
-
-
-    if (result > 0)
+    if (!connection.valid)
     {
-        int error = 0;
-
-        socklen_t length =
-            sizeof(error);
-
-
-        getsockopt(
-            socketFD,
-            SOL_SOCKET,
-            SO_ERROR,
-            &error,
-            &length
-        );
-
-
-        open =
-            (error == 0);
+        return false;
     }
 
 
-    close(socketFD);
+    slipnet::platform::tcpClose(
+        connection
+    );
 
 
-    return open;
+    return true;
 }
 
 
+/*
+ * ============================================================
+ * Scan common ports
+ * ============================================================
+ */
 std::vector<Port>
 PortScanner::scan(
     const std::string& host
 ) const
 {
-    /*
-        Default common TCP ports.
-    */
-
-    const std::vector<int> commonPorts =
-    {
-        21,
-        22,
-        23,
-        25,
-        53,
-        80,
-        110,
-        135,
-        139,
-        143,
-        443,
-        445,
-        3306,
-        3389,
-        5432,
-        5900,
-        6379,
-        8080,
-        8443
-    };
-
-
     std::vector<Port> results;
 
 
-    for (int port : commonPorts)
+    /*
+     * Scan concurrently so the command does not wait for
+     * every port sequentially.
+     */
+    std::vector<std::future<Port>> futures;
+
+
+    futures.reserve(
+        COMMON_PORTS.size()
+    );
+
+
+    for (int port : COMMON_PORTS)
     {
-        if (
-            SignalHandler::isStopRequested()
-        )
+        if (SignalHandler::isStopRequested())
         {
             break;
         }
 
 
-        double latency = 0.0;
+        futures.push_back(
+            std::async(
+                std::launch::async,
+
+                [this, &host, port]()
+                {
+                    double latency = 0.0;
 
 
-        bool open =
-            checkPort(
-                host,
-                port,
-                latency
-            );
+                    const bool open =
+                        checkPort(
+                            host,
+                            port,
+                            latency
+                        );
+
+
+                    return Port
+                    {
+                        port,
+                        open,
+                        latency
+                    };
+                }
+            )
+        );
+    }
+
+
+    /*
+     * Collect results.
+     */
+    for (auto& future : futures)
+    {
+        if (SignalHandler::isStopRequested())
+        {
+            break;
+        }
 
 
         results.push_back(
-            {
-                port,
-                open,
-                latency
-            }
+            future.get()
         );
     }
+
+
+    /*
+     * Keep results deterministic.
+     */
+    std::sort(
+        results.begin(),
+        results.end(),
+
+        [](const Port& a, const Port& b)
+        {
+            return a.number < b.number;
+        }
+    );
 
 
     return results;
 }
 
 
+/*
+ * ============================================================
+ * Scan custom port range
+ * ============================================================
+ *
+ * Example:
+ *
+ *     port|:scan 192.168.1.10 1-1024
+ *
+ * The CLI parser should provide:
+ *
+ *     startPort
+ *     endPort
+ * ============================================================
+ */
 std::vector<Port>
 PortScanner::scan(
     const std::string& host,
@@ -256,16 +247,21 @@ PortScanner::scan(
     std::vector<Port> results;
 
 
-    if (startPort < 1)
-    {
-        startPort = 1;
-    }
+    /*
+     * Sanitize range.
+     */
+    startPort =
+        std::max(
+            1,
+            startPort
+        );
 
 
-    if (endPort > 65535)
-    {
-        endPort = 65535;
-    }
+    endPort =
+        std::min(
+            65535,
+            endPort
+        );
 
 
     if (startPort > endPort)
@@ -274,30 +270,25 @@ PortScanner::scan(
     }
 
 
+    std::vector<std::future<Port>> futures;
+
+    futures.reserve(
+        MAX_WORKERS
+    );
+
+
     /*
-        Limit concurrent connections.
-
-        This prevents accidentally creating
-        thousands of sockets simultaneously.
-    */
-
-    constexpr std::size_t MAX_WORKERS = 64;
-
-
-    std::vector<
-        std::future<Port>
-    > futures;
-
-
+     * Process the range in batches.
+     *
+     * This prevents thousands of simultaneous sockets.
+     */
     for (
         int port = startPort;
         port <= endPort;
         ++port
     )
     {
-        if (
-            SignalHandler::isStopRequested()
-        )
+        if (SignalHandler::isStopRequested())
         {
             break;
         }
@@ -306,16 +297,19 @@ PortScanner::scan(
         futures.push_back(
             std::async(
                 std::launch::async,
+
                 [this, &host, port]()
                 {
                     double latency = 0.0;
 
-                    bool open =
+
+                    const bool open =
                         checkPort(
                             host,
                             port,
                             latency
                         );
+
 
                     return Port
                     {
@@ -328,19 +322,14 @@ PortScanner::scan(
         );
 
 
-        if (
-            futures.size()
-            >= MAX_WORKERS
-        )
+        /*
+         * Wait once the worker limit is reached.
+         */
+        if (futures.size() >= MAX_WORKERS)
         {
-            for (
-                auto& future :
-                futures
-            )
+            for (auto& future : futures)
             {
-                if (
-                    SignalHandler::isStopRequested()
-                )
+                if (SignalHandler::isStopRequested())
                 {
                     break;
                 }
@@ -358,17 +347,11 @@ PortScanner::scan(
 
 
     /*
-        Collect remaining scans.
-    */
-
-    for (
-        auto& future :
-        futures
-    )
+     * Collect remaining workers.
+     */
+    for (auto& future : futures)
     {
-        if (
-            SignalHandler::isStopRequested()
-        )
+        if (SignalHandler::isStopRequested())
         {
             break;
         }
@@ -378,6 +361,20 @@ PortScanner::scan(
             future.get()
         );
     }
+
+
+    /*
+     * Keep output ordered by port number.
+     */
+    std::sort(
+        results.begin(),
+        results.end(),
+
+        [](const Port& a, const Port& b)
+        {
+            return a.number < b.number;
+        }
+    );
 
 
     return results;

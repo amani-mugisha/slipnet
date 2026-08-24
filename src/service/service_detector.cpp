@@ -1,202 +1,163 @@
 #include "service/service_detector.hpp"
 
-#include <arpa/inet.h>
+#include "platform/tcp.hpp"
 
-#include <chrono>
-
-#include <cstring>
-
-#include <netinet/in.h>
-
-#include <sys/socket.h>
-
-#include <unistd.h>
+#include <algorithm>
+#include <cctype>
+#include <string>
 
 
 namespace
 {
 
-constexpr int CONNECTION_TIMEOUT_SECONDS = 2;
-
+constexpr int DEFAULT_TIMEOUT_MS = 2000;
 constexpr int BUFFER_SIZE = 4096;
 
 
-bool connectToHost(
-    int socketFD,
-    const std::string& host,
-    int port
+std::string trim(
+    std::string value
 )
 {
-    sockaddr_in address{};
-
-    address.sin_family = AF_INET;
-
-    address.sin_port =
-        htons(
-            static_cast<uint16_t>(port)
-        );
-
-
-    if (
-        inet_pton(
-            AF_INET,
-            host.c_str(),
-            &address.sin_addr
-        ) != 1
+    while (
+        !value.empty() &&
+        std::isspace(
+            static_cast<unsigned char>(
+                value.front()
+            )
+        )
     )
     {
-        return false;
+        value.erase(
+            value.begin()
+        );
     }
 
+    while (
+        !value.empty() &&
+        std::isspace(
+            static_cast<unsigned char>(
+                value.back()
+            )
+        )
+    )
+    {
+        value.pop_back();
+    }
 
-    timeval timeout{};
-
-    timeout.tv_sec =
-        CONNECTION_TIMEOUT_SECONDS;
-
-    timeout.tv_usec = 0;
-
-
-    setsockopt(
-        socketFD,
-        SOL_SOCKET,
-        SO_RCVTIMEO,
-        &timeout,
-        sizeof(timeout)
-    );
+    return value;
+}
 
 
-    setsockopt(
-        socketFD,
-        SOL_SOCKET,
-        SO_SNDTIMEO,
-        &timeout,
-        sizeof(timeout)
-    );
-
-
+bool startsWith(
+    const std::string& value,
+    const std::string& prefix
+)
+{
     return
-        connect(
-            socketFD,
-            reinterpret_cast<sockaddr*>(
-                &address
-            ),
-            sizeof(address)
-        ) == 0;
-}
-
+        value.rfind(prefix, 0)
+        == 0;
 }
 
 
-/*
-    Attempt to obtain a response/banner
-    from a TCP service.
-*/
+std::string extractHeader(
+    const std::string& response,
+    const std::string& header
+)
+{
+    std::size_t position =
+        response.find(header);
+
+    if (
+        position == std::string::npos
+    )
+    {
+        return {};
+    }
+
+    std::size_t start =
+        position + header.size();
+
+    std::size_t end =
+        response.find(
+            '\n',
+            start
+        );
+
+    if (
+        end == std::string::npos
+    )
+    {
+        end =
+            response.size();
+    }
+
+    return trim(
+        response.substr(
+            start,
+            end - start
+        )
+    );
+}
+
+} // namespace
+
+
 std::string ServiceDetector::probe(
     const std::string& host,
     int port
 ) const
 {
-    int socketFD =
-        socket(
-            AF_INET,
-            SOCK_STREAM,
-            0
+    auto connection =
+        slipnet::platform::tcpConnect(
+            host,
+            port,
+            DEFAULT_TIMEOUT_MS
         );
 
-
-    if (socketFD < 0)
+    if (!connection.valid)
     {
         return {};
     }
-
-
-    if (
-        !connectToHost(
-            socketFD,
-            host,
-            port
-        )
-    )
-    {
-        close(socketFD);
-
-        return {};
-    }
-
 
     /*
-        HTTP requires an application-level
-        request before the server normally
-        sends its response.
-    */
-
+     * HTTP services normally require
+     * an application-level request.
+     */
     if (
         port == 80 ||
-        port == 8080 ||
+        port == 443 ||
         port == 8000 ||
+        port == 8080 ||
+        port == 8443 ||
         port == 8888
     )
     {
-        const char* request =
+        const std::string request =
             "HEAD / HTTP/1.0\r\n"
             "Host: localhost\r\n"
             "Connection: close\r\n"
             "\r\n";
 
-
-        send(
-            socketFD,
-            request,
-            std::strlen(request),
-            0
+        slipnet::platform::tcpSend(
+            connection,
+            request
         );
     }
 
-
-    char buffer[BUFFER_SIZE];
-
-    std::memset(
-        buffer,
-        0,
-        sizeof(buffer)
-    );
-
-
-    ssize_t received =
-        recv(
-            socketFD,
-            buffer,
-            sizeof(buffer) - 1,
-            0
+    std::string response =
+        slipnet::platform::tcpReceive(
+            connection,
+            BUFFER_SIZE
         );
 
-
-    close(socketFD);
-
-
-    if (received <= 0)
-    {
-        return {};
-    }
-
-
-    buffer[received] = '\0';
-
-
-    return std::string(
-        buffer,
-        static_cast<std::size_t>(
-            received
-        )
+    slipnet::platform::tcpClose(
+        connection
     );
+
+    return response;
 }
 
 
-/*
-    Identify a service using its response
-    and a small amount of protocol knowledge.
-*/
 Service ServiceDetector::identify(
     int port,
     const std::string& response
@@ -205,136 +166,96 @@ Service ServiceDetector::identify(
     Service service{};
 
     service.port = port;
-
     service.protocol = "TCP";
-
     service.name = "Unknown";
-
-    service.version = "";
-
+    service.version = {};
     service.banner = response;
-
     service.detected = false;
 
 
     /*
-        SSH
-    */
-
+     * SSH
+     */
     if (
-        response.rfind(
-            "SSH-",
-            0
-        ) == 0
+        startsWith(
+            response,
+            "SSH-"
+        )
     )
     {
         service.name = "SSH";
-
         service.detected = true;
 
-        service.version = response;
+        std::size_t newline =
+            response.find('\n');
+
+        service.version =
+            trim(
+                response.substr(
+                    0,
+                    newline
+                )
+            );
 
         return service;
     }
 
 
     /*
-        FTP
-    */
-
+     * FTP
+     */
     if (
-        response.rfind(
-            "220",
-            0
-        ) == 0
-    )
-    {
-        if (
-            port == 21 ||
+        port == 21 &&
+        (
+            startsWith(
+                response,
+                "220"
+            ) ||
             response.find("FTP")
                 != std::string::npos
         )
-        {
-            service.name = "FTP";
+    )
+    {
+        service.name = "FTP";
+        service.detected = true;
 
-            service.detected = true;
-
-            return service;
-        }
+        return service;
     }
 
 
     /*
-        HTTP
-    */
-
+     * HTTP
+     */
     if (
         response.find("HTTP/")
-            != std::string::npos
+        != std::string::npos
     )
     {
         service.name = "HTTP";
-
         service.detected = true;
 
-
-        /*
-            Attempt to extract the
-            Server header.
-        */
-
-        std::size_t position =
-            response.find(
+        service.version =
+            extractHeader(
+                response,
                 "Server:"
             );
 
-
-        if (
-            position
-            != std::string::npos
-        )
-        {
-            std::size_t start =
-                position + 7;
-
-
-            std::size_t end =
-                response.find(
-                    '\n',
-                    start
-                );
-
-
-            if (
-                end
-                == std::string::npos
-            )
-            {
-                end =
-                    response.size();
-            }
-
-
-            service.version =
-                response.substr(
-                    start,
-                    end - start
-                );
-        }
-
-
         return service;
     }
 
 
     /*
-        MySQL commonly uses port 3306.
-    */
-
-    if (port == 3306)
+     * SMTP
+     */
+    if (
+        port == 25 &&
+        startsWith(
+            response,
+            "220"
+        )
+    )
     {
-        service.name = "MySQL";
-
+        service.name = "SMTP";
         service.detected = true;
 
         return service;
@@ -342,13 +263,34 @@ Service ServiceDetector::identify(
 
 
     /*
-        PostgreSQL commonly uses 5432.
-    */
+     * MySQL
+     *
+     * MySQL normally sends a binary
+     * handshake packet immediately
+     * after connection.
+     */
+    if (port == 3306)
+    {
+        if (!response.empty())
+        {
+            service.name = "MySQL";
+            service.detected = true;
+        }
 
+        return service;
+    }
+
+
+    /*
+     * PostgreSQL
+     *
+     * PostgreSQL does not normally send
+     * a banner immediately, so port
+     * knowledge is used as a fallback.
+     */
     if (port == 5432)
     {
         service.name = "PostgreSQL";
-
         service.detected = true;
 
         return service;
@@ -356,13 +298,17 @@ Service ServiceDetector::identify(
 
 
     /*
-        Redis commonly uses 6379.
-    */
-
-    if (port == 6379)
+     * Redis
+     */
+    if (
+        port == 6379 &&
+        (
+            response.find("+") == 0 ||
+            response.find("-") == 0
+        )
+    )
     {
         service.name = "Redis";
-
         service.detected = true;
 
         return service;
@@ -370,24 +316,23 @@ Service ServiceDetector::identify(
 
 
     /*
-        Known port fallback.
-    */
-
+     * Known-service fallback.
+     *
+     * Port numbers alone are NOT proof
+     * of the actual service. We therefore
+     * mark these as detected only when
+     * the probe gave us some evidence,
+     * except for protocols where the
+     * handshake is commonly silent.
+     */
     switch (port)
     {
         case 22:
-            service.name = "SSH";
-            service.detected = true;
-            break;
-
-        case 21:
-            service.name = "FTP";
-            service.detected = true;
-            break;
-
-        case 25:
-            service.name = "SMTP";
-            service.detected = true;
+            if (!response.empty())
+            {
+                service.name = "SSH";
+                service.detected = true;
+            }
             break;
 
         case 53:
@@ -395,49 +340,65 @@ Service ServiceDetector::identify(
             service.detected = true;
             break;
 
-        case 80:
-            service.name = "HTTP";
-            service.detected = true;
-            break;
-
-        case 443:
-            service.name = "HTTPS";
-            service.detected = true;
-            break;
-
         case 110:
-            service.name = "POP3";
-            service.detected = true;
+            if (
+                startsWith(
+                    response,
+                    "+OK"
+                )
+            )
+            {
+                service.name = "POP3";
+                service.detected = true;
+            }
             break;
 
         case 143:
-            service.name = "IMAP";
-            service.detected = true;
+            if (
+                response.find("* OK")
+                != std::string::npos
+            )
+            {
+                service.name = "IMAP";
+                service.detected = true;
+            }
+            break;
+
+        case 443:
+            /*
+             * A TCP connection on 443 proves
+             * the port is reachable, but without
+             * TLS negotiation we should not claim
+             * the application is HTTPS.
+             */
             break;
 
         default:
             break;
     }
 
-
     return service;
 }
 
 
-/*
-    Detect one service.
-*/
 Service ServiceDetector::detect(
     const std::string& host,
     int port
 ) const
 {
-    std::string response =
+    if (
+        port < 1 ||
+        port > 65535
+    )
+    {
+        return {};
+    }
+
+    const std::string response =
         probe(
             host,
             port
         );
-
 
     return identify(
         port,
@@ -446,9 +407,6 @@ Service ServiceDetector::detect(
 }
 
 
-/*
-    Detect several services.
-*/
 std::vector<Service>
 ServiceDetector::detect(
     const std::string& host,
@@ -456,7 +414,6 @@ ServiceDetector::detect(
 ) const
 {
     std::vector<Service> results;
-
 
     for (
         int port :
@@ -469,15 +426,13 @@ ServiceDetector::detect(
                 port
             );
 
-
         if (service.detected)
         {
             results.push_back(
-                service
+                std::move(service)
             );
         }
     }
-
 
     return results;
 }

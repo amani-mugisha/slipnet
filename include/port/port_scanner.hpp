@@ -1,11 +1,9 @@
 #pragma once
 
 #include <string>
-
 #include <vector>
 
 #include "port/port.hpp"
-
 
 class PortScanner
 {
@@ -15,13 +13,11 @@ public:
         const std::string& host
     ) const;
 
-
     std::vector<Port> scan(
         const std::string& host,
         int startPort,
         int endPort
     ) const;
-
 
 private:
 

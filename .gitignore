@@ -33,3 +33,6 @@ Thumbs.db
 # Runtime packet capture data
 data/*
 !data/.gitkeep
+
+# SlipNet packet capture files
+*.slipcap

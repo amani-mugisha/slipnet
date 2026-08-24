@@ -3,14 +3,28 @@
 #include <string>
 #include <vector>
 
-#include "security/alert.hpp"
 #include "core/network_state.hpp"
+#include "security/alert.hpp"
 
-
-// SecurityDetector runs a set of passive, rule-based defensive checks
-// against ports/services SlipNet has already discovered for a host.
-// It never probes or connects itself — every check is derived purely
-// from data collected by earlier scan/discovery commands.
+/*
+ * SlipNet Security Detector
+ *
+ * Passive security-analysis engine.
+ *
+ * IMPORTANT:
+ * This component does not perform network connections,
+ * authentication attempts, exploitation, or vulnerability
+ * probing.
+ *
+ * It analyzes information already collected by SlipNet:
+ *
+ *     ip|:seek
+ *     port|:scan
+ *     svc|:detect
+ *
+ * The same implementation is therefore usable on both
+ * Linux and Windows.
+ */
 class SecurityDetector
 {
 public:
@@ -36,14 +50,45 @@ private:
         std::vector<Alert>& alerts
     ) const;
 
-    void checkRemoteAdmin(
+    void checkRemoteAdministration(
         const std::string& ip,
         const std::vector<PortInfo>& ports,
         std::vector<Alert>& alerts
     ) const;
 
-    void checkKnownVulnerableVersions(
+    void checkManagementServices(
         const std::string& ip,
+        const std::vector<PortInfo>& ports,
+        std::vector<Alert>& alerts
+    ) const;
+
+    void checkFileSharing(
+        const std::string& ip,
+        const std::vector<PortInfo>& ports,
+        std::vector<Alert>& alerts
+    ) const;
+
+    void checkCleartextServices(
+        const std::string& ip,
+        const std::vector<PortInfo>& ports,
+        std::vector<Alert>& alerts
+    ) const;
+
+    void checkHighRiskServices(
+        const std::string& ip,
+        const std::vector<PortInfo>& ports,
+        std::vector<Alert>& alerts
+    ) const;
+
+    void checkServiceExposure(
+        const std::string& ip,
+        const std::vector<ServiceInfo>& services,
+        std::vector<Alert>& alerts
+    ) const;
+
+    void checkServicePortConsistency(
+        const std::string& ip,
+        const std::vector<PortInfo>& ports,
         const std::vector<ServiceInfo>& services,
         std::vector<Alert>& alerts
     ) const;
@@ -53,4 +98,10 @@ private:
         const std::vector<PortInfo>& ports,
         std::vector<Alert>& alerts
     ) const;
-}; //security_detector.hpp
+
+    void checkAdministrativeExposure(
+        const std::string& ip,
+        const std::vector<PortInfo>& ports,
+        std::vector<Alert>& alerts
+    ) const;
+};

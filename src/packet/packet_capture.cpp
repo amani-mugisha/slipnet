@@ -1,340 +1,175 @@
 #include "packet/packet_capture.hpp"
 
-#include "cli/signal_handler.hpp"
+#include "platform/packet_capture.hpp"
 
-#include <arpa/inet.h>
-
+#include <algorithm>
+#include <cctype>
 #include <chrono>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <net/ethernet.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
-#include <netinet/ip_icmp.h>
 #include <sstream>
-#include <string>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <thread>
-#include <unistd.h>
-
-#include <linux/if_ether.h>
-#include <linux/if_packet.h>
-#include <net/if.h>
 
 namespace
 {
 
-constexpr const char* CAPTURE_FILE =
-    "data/last_capture.txt";
+std::string toUpper(
+    std::string value
+)
+{
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char c)
+        {
+            return static_cast<char>(
+                std::toupper(c)
+            );
+        }
+    );
+
+    return value;
+}
 
 
-std::string nowTimestamp()
+std::string sanitize(
+    const std::string& value
+)
+{
+    std::string result;
+
+    for (char c : value)
+    {
+        if (
+            c == '\n' ||
+            c == '\r' ||
+            c == '='
+        )
+        {
+            result += '_';
+        }
+        else
+        {
+            result += c;
+        }
+    }
+
+    return result;
+}
+
+
+std::string makeOutputFile()
 {
     const auto now =
         std::chrono::system_clock::now();
 
-    const auto time =
+    const std::time_t time =
         std::chrono::system_clock::to_time_t(now);
 
-    std::tm local{};
+    std::tm localTime{};
 
+#ifdef _WIN32
+    localtime_s(
+        &localTime,
+        &time
+    );
+#else
     localtime_r(
         &time,
-        &local
+        &localTime
     );
-
-    const auto milliseconds =
-        std::chrono::duration_cast<
-            std::chrono::milliseconds
-        >(
-            now.time_since_epoch()
-        ) % 1000;
+#endif
 
     std::ostringstream output;
 
     output
+        << "slipnet_capture_"
         << std::put_time(
-            &local,
-            "%H:%M:%S"
+            &localTime,
+            "%Y%m%d_%H%M%S"
         )
-        << "."
-        << std::setfill('0')
-        << std::setw(3)
-        << milliseconds.count();
+        << ".slipcap";
 
     return output.str();
 }
 
-
-std::string ipv4ToString(
-    const in_addr& address
-)
-{
-    char buffer[INET_ADDRSTRLEN]{};
-
-    if (
-        inet_ntop(
-            AF_INET,
-            &address,
-            buffer,
-            sizeof(buffer)
-        ) == nullptr
-    )
-    {
-        return "unknown";
-    }
-
-    return buffer;
-}
+} // namespace
 
 
-std::string normalizeFilter(
-    std::string filter
-)
-{
-    for (char& c : filter)
-    {
-        c = static_cast<char>(
-            std::toupper(
-                static_cast<unsigned char>(c)
-            )
-        );
-    }
-
-    return filter;
-}
-
-
-bool filterMatches(
+bool PacketCapture::matchesFilter(
     const Packet& packet,
     const std::string& filter
-)
+) const
 {
-    if (filter == "ALL")
+    const std::string normalized =
+        toUpper(filter);
+
+    if (
+        normalized.empty() ||
+        normalized == "ALL"
+    )
     {
         return true;
     }
 
-    return packet.protocol == filter;
+    if (
+        normalized == "TCP" ||
+        normalized == "UDP" ||
+        normalized == "ICMP"
+    )
+    {
+        return toUpper(packet.protocol)
+            == normalized;
+    }
+
+    return false;
 }
 
 
-bool decodePacket(
-    const unsigned char* buffer,
-    std::size_t length,
-    Packet& packet
-)
-{
-    if (
-        length <
-        sizeof(ethhdr) +
-        sizeof(iphdr)
-    )
-    {
-        return false;
-    }
-
-    const auto* ethernet =
-        reinterpret_cast<
-            const ethhdr*
-        >(buffer);
-
-    if (
-        ntohs(
-            ethernet->h_proto
-        )
-        !=
-        ETH_P_IP
-    )
-    {
-        return false;
-    }
-
-    const auto* ip =
-        reinterpret_cast<
-            const iphdr*
-        >(
-            buffer +
-            sizeof(ethhdr)
-        );
-
-    const std::size_t ipHeaderLength =
-        static_cast<std::size_t>(
-            ip->ihl
-        ) * 4;
-
-    if (
-        ipHeaderLength < 20 ||
-        length <
-        sizeof(ethhdr) +
-        ipHeaderLength
-    )
-    {
-        return false;
-    }
-
-    in_addr sourceAddress{};
-    sourceAddress.s_addr =
-        ip->saddr;
-
-    in_addr destinationAddress{};
-    destinationAddress.s_addr =
-        ip->daddr;
-
-    packet.source =
-        ipv4ToString(
-            sourceAddress
-        );
-
-    packet.destination =
-        ipv4ToString(
-            destinationAddress
-        );
-
-    packet.ttl =
-        ip->ttl;
-
-    packet.length =
-        static_cast<uint32_t>(
-            length
-        );
-
-    switch (ip->protocol)
-    {
-        case IPPROTO_TCP:
-        {
-            packet.protocol =
-                "TCP";
-
-            const std::size_t offset =
-                sizeof(ethhdr) +
-                ipHeaderLength;
-
-            if (
-                length >=
-                offset +
-                sizeof(tcphdr)
-            )
-            {
-                const auto* tcp =
-                    reinterpret_cast<
-                        const tcphdr*
-                    >(
-                        buffer + offset
-                    );
-
-                packet.sourcePort =
-                    ntohs(
-                        tcp->source
-                    );
-
-                packet.destinationPort =
-                    ntohs(
-                        tcp->dest
-                    );
-            }
-
-            break;
-        }
-
-        case IPPROTO_UDP:
-        {
-            packet.protocol =
-                "UDP";
-
-            const std::size_t offset =
-                sizeof(ethhdr) +
-                ipHeaderLength;
-
-            if (
-                length >=
-                offset +
-                sizeof(udphdr)
-            )
-            {
-                const auto* udp =
-                    reinterpret_cast<
-                        const udphdr*
-                    >(
-                        buffer + offset
-                    );
-
-                packet.sourcePort =
-                    ntohs(
-                        udp->source
-                    );
-
-                packet.destinationPort =
-                    ntohs(
-                        udp->dest
-                    );
-            }
-
-            break;
-        }
-
-        case IPPROTO_ICMP:
-            packet.protocol =
-                "ICMP";
-            break;
-
-        default:
-            packet.protocol =
-                "OTHER";
-            break;
-    }
-
-    packet.decoded = true;
-
-    return true;
-}
-
-
-void saveCapture(
+bool PacketCapture::saveCapture(
+    const std::string& file,
     const std::string& interfaceName,
-    int duration,
+    int durationSeconds,
     const std::string& filter,
     const std::vector<Packet>& packets
-)
+) const
 {
-    std::filesystem::create_directories(
-        "data"
-    );
-
     std::ofstream output(
-        CAPTURE_FILE,
+        file,
+        std::ios::out |
         std::ios::trunc
     );
 
     if (!output)
     {
-        return;
+        return false;
     }
 
-    uint64_t totalBytes = 0;
+    std::size_t totalBytes = 0;
 
     for (const auto& packet : packets)
     {
-        totalBytes +=
-            packet.length;
+        if (packet.length > 0)
+        {
+            totalBytes +=
+                static_cast<std::size_t>(
+                    packet.length
+                );
+        }
     }
 
     output
         << "SLIPNET_CAPTURE_V2\n"
         << "interface="
-        << interfaceName
+        << sanitize(interfaceName)
         << '\n'
         << "duration="
-        << duration
+        << durationSeconds
         << '\n'
         << "filter="
-        << filter
+        << sanitize(filter)
         << '\n'
         << "packets="
         << packets.size()
@@ -347,35 +182,45 @@ void saveCapture(
     {
         output
             << "[PACKET]\n"
+
             << "id="
             << packet.id
             << '\n'
+
             << "timestamp="
-            << packet.timestamp
+            << sanitize(packet.timestamp)
             << '\n'
+
             << "source="
-            << packet.source
+            << sanitize(packet.source)
             << '\n'
+
             << "destination="
-            << packet.destination
+            << sanitize(packet.destination)
             << '\n'
+
             << "protocol="
-            << packet.protocol
+            << sanitize(packet.protocol)
             << '\n'
+
             << "source_port="
             << packet.sourcePort
             << '\n'
+
             << "destination_port="
             << packet.destinationPort
             << '\n'
+
             << "ttl="
             << static_cast<int>(
                 packet.ttl
             )
             << '\n'
+
             << "length="
             << packet.length
             << '\n'
+
             << "decoded="
             << (
                 packet.decoded
@@ -384,42 +229,41 @@ void saveCapture(
             )
             << "\n\n";
     }
+
+    return output.good();
 }
 
-}
 
-
-std::vector<Packet>
-PacketCapture::capture(
+std::vector<Packet> PacketCapture::capture(
     const std::string& interfaceName,
-    int seconds,
+    int durationSeconds,
     const std::string& filter
 ) const
 {
     std::vector<Packet> packets;
 
+    if (interfaceName.empty())
+    {
+        std::cout
+            << "[!] Capture interface is empty.\n";
+
+        return packets;
+    }
+
+    if (
+        durationSeconds <= 0 ||
+        durationSeconds > 86400
+    )
+    {
+        std::cout
+            << "[!] Capture duration must be between "
+            << "1 and 86400 seconds.\n";
+
+        return packets;
+    }
+
     const std::string normalizedFilter =
-        normalizeFilter(filter);
-
-    if (
-        interfaceName.empty()
-    )
-    {
-        std::cout
-            << "\n[!] Interface is required.\n";
-
-        return packets;
-    }
-
-    if (
-        seconds <= 0
-    )
-    {
-        std::cout
-            << "\n[!] Duration must be greater than zero.\n";
-
-        return packets;
-    }
+        toUpper(filter);
 
     if (
         normalizedFilter != "ALL" &&
@@ -429,7 +273,7 @@ PacketCapture::capture(
     )
     {
         std::cout
-            << "\n[!] Unsupported capture filter: "
+            << "[!] Unsupported packet filter: "
             << filter
             << "\n"
             << "[*] Supported filters: ALL, TCP, UDP, ICMP\n";
@@ -437,335 +281,173 @@ PacketCapture::capture(
         return packets;
     }
 
-    std::cout
-        << "\n"
-        << "[*] Preparing packet capture...\n"
-        << "[+] Interface: "
-        << interfaceName
-        << "\n\n";
-
-    std::cout
-        << "╭──────────────────────────────────────────────────────────────╮\n"
-        << "│ SLIPNET :: PACKET CAPTURE                                    │\n"
-        << "╰──────────────────────────────────────────────────────────────╯\n\n";
-
-    std::cout
-        << " Interface     "
-        << interfaceName
-        << "\n"
-        << " Mode          Passive\n"
-        << " Duration      "
-        << seconds
-        << " seconds\n"
-        << " Filter        "
-        << normalizedFilter
-        << "\n\n";
-
-    const int socketFd =
-        socket(
-            AF_PACKET,
-            SOCK_RAW,
-            htons(
-                ETH_P_ALL
-            )
-        );
-
-    if (socketFd < 0)
-    {
-        std::cout
-            << "[!] Unable to initialize capture socket.\n"
-            << "[*] Raw packet capture normally requires root privileges.\n";
-
-        return packets;
-    }
-
-    const unsigned int interfaceIndex =
-        if_nametoindex(
-            interfaceName.c_str()
-        );
-
-    if (interfaceIndex == 0)
-    {
-        std::cout
-            << "[!] Interface '"
-            << interfaceName
-            << "' does not exist.\n";
-
-        close(socketFd);
-
-        return packets;
-    }
-
-    sockaddr_ll address{};
-
-    address.sll_family =
-        AF_PACKET;
-
-    address.sll_protocol =
-        htons(ETH_P_ALL);
-
-    address.sll_ifindex =
-        static_cast<int>(
-            interfaceIndex
-        );
-
     if (
-        bind(
-            socketFd,
-            reinterpret_cast<
-                sockaddr*
-            >(&address),
-            sizeof(address)
-        ) < 0
+        !slipnet::platform::packetCaptureAvailable()
     )
     {
         std::cout
-            << "[!] Failed to bind capture socket to "
-            << interfaceName
-            << ".\n";
+            << "\n[!] Packet capture backend is unavailable.\n"
+            << "[!] Backend: "
+            << slipnet::platform::packetCaptureBackend()
+            << '\n';
 
-        close(socketFd);
+#ifdef _WIN32
+        std::cout
+            << "[*] Install Npcap with WinPcap compatibility enabled.\n";
+#else
+        std::cout
+            << "[*] Run SlipNet with sufficient privileges.\n";
+#endif
 
         return packets;
     }
 
-    timeval timeout{};
-    timeout.tv_sec = 1;
-    timeout.tv_usec = 0;
+    slipnet::platform::PacketCaptureConfig config;
 
-    setsockopt(
-        socketFd,
-        SOL_SOCKET,
-        SO_RCVTIMEO,
-        &timeout,
-        sizeof(timeout)
-    );
+    config.interfaceName =
+        interfaceName;
+
+    config.durationSeconds =
+        durationSeconds;
+
+    config.filter =
+        normalizedFilter;
+
+    config.maxPackets =
+        10000;
 
     std::cout
-        << "[+] Capture socket initialized.\n"
-        << "[+] Listening on "
+        << "\n[*] Starting packet capture...\n"
+        << "\n"
+        << "  Interface : "
         << interfaceName
-        << "...\n\n";
+        << '\n'
+        << "  Duration  : "
+        << durationSeconds
+        << " seconds\n"
+        << "  Filter    : "
+        << normalizedFilter
+        << '\n'
+        << "  Backend   : "
+        << slipnet::platform::packetCaptureBackend()
+        << "\n\n";
 
-    std::cout
-        << "┌────────┬────────────────────┬────────────────────┬────────┬────────┐\n"
-        << "│ TIME   │ SOURCE             │ DESTINATION        │ PROTO  │ LENGTH │\n"
-        << "├────────┼────────────────────┼────────────────────┼────────┼────────┤\n";
+    const auto result =
+        slipnet::platform::capturePackets(
+            config
+        );
 
-    SignalHandler::clearStop();
-
-    const auto start =
-        std::chrono::steady_clock::now();
-
-    unsigned char buffer[
-        65536
-    ];
-
-    uint64_t packetId = 0;
-
-    while (true)
+    if (!result.success)
     {
-        if (
-            SignalHandler::isStopRequested()
-        )
-        {
-            break;
-        }
+        std::cout
+            << "\n[!] Packet capture failed.\n"
+            << "[!] "
+            << result.error
+            << '\n';
 
-        const auto now =
-            std::chrono::steady_clock::now();
+        return packets;
+    }
 
-        const auto elapsed =
-            std::chrono::duration_cast<
-                std::chrono::seconds
-            >(
-                now - start
-            ).count();
+    std::uint64_t packetId = 1;
 
-        if (
-            elapsed >= seconds
-        )
-        {
-            break;
-        }
+    for (const auto& captured :
+         result.packets)
+    {
+        Packet packet{};
 
-        const ssize_t received =
-            recvfrom(
-                socketFd,
-                buffer,
-                sizeof(buffer),
-                0,
-                nullptr,
-                nullptr
+        packet.id =
+            packetId++;
+
+        packet.timestamp =
+            captured.timestamp;
+
+        packet.source =
+            captured.source;
+
+        packet.destination =
+            captured.destination;
+
+        packet.protocol =
+            captured.protocol;
+
+        packet.sourcePort =
+            captured.sourcePort;
+
+        packet.destinationPort =
+            captured.destinationPort;
+
+        packet.ttl =
+            captured.ttl;
+
+        packet.length =
+            static_cast<int>(
+                captured.length
             );
 
-        if (received <= 0)
-        {
-            continue;
-        }
-
-        Packet packet;
+        packet.decoded =
+            captured.decoded;
 
         if (
-            !decodePacket(
-                buffer,
-                static_cast<std::size_t>(
-                    received
-                ),
-                packet
-            )
-        )
-        {
-            continue;
-        }
-
-        if (
-            !filterMatches(
+            matchesFilter(
                 packet,
                 normalizedFilter
             )
         )
         {
-            continue;
+            packets.push_back(
+                std::move(packet)
+            );
         }
-
-        packet.id =
-            ++packetId;
-
-        packet.timestamp =
-            nowTimestamp();
-
-        packets.push_back(
-            packet
-        );
-
-        std::cout
-            << "│ "
-            << std::left
-            << std::setw(6)
-            << packet.timestamp.substr(
-                0,
-                5
-            )
-            << " │ "
-            << std::setw(18)
-            << packet.source
-            << " │ "
-            << std::setw(18)
-            << packet.destination
-            << " │ "
-            << std::setw(6)
-            << packet.protocol
-            << " │ "
-            << std::right
-            << std::setw(6)
-            << packet.length
-            << " │\n";
     }
 
-    close(socketFd);
+    const std::string outputFile =
+        makeOutputFile();
 
-    std::cout
-        << "└────────┴────────────────────┴────────────────────┴────────┴────────┘\n\n";
-
-    saveCapture(
-        interfaceName,
-        seconds,
-        normalizedFilter,
-        packets
-    );
-
-    uint64_t totalBytes = 0;
-
-    uint64_t tcp = 0;
-    uint64_t udp = 0;
-    uint64_t icmp = 0;
-    uint64_t other = 0;
-
-    for (const auto& packet : packets)
-    {
-        totalBytes +=
-            packet.length;
-
-        if (packet.protocol == "TCP")
-            ++tcp;
-        else if (packet.protocol == "UDP")
-            ++udp;
-        else if (packet.protocol == "ICMP")
-            ++icmp;
-        else
-            ++other;
-    }
-
-    const bool interrupted =
-        SignalHandler::isStopRequested();
-
-    std::cout
-        << " CAPTURE SUMMARY\n"
-        << " ────────────────────────────────────────────────────────────\n"
-        << " Packets             "
-        << packets.size()
-        << "\n"
-        << " Decoded             "
-        << packets.size()
-        << "\n"
-        << " Bytes               "
-        << totalBytes
-        << " B\n"
-        << " TCP                 "
-        << tcp
-        << "\n"
-        << " UDP                 "
-        << udp
-        << "\n"
-        << " ICMP                "
-        << icmp
-        << "\n"
-        << " Other               "
-        << other
-        << "\n\n";
-
-    std::cout
-        << " STATUS\n"
-        << " ────────────────────────────────────────────────────────────\n"
-        << " Interface            "
-        << interfaceName
-        << "\n"
-        << " Capture              "
-        << (
-            interrupted
-                ? "INTERRUPTED"
-                : "COMPLETED"
+    if (
+        !saveCapture(
+            outputFile,
+            interfaceName,
+            durationSeconds,
+            normalizedFilter,
+            packets
         )
+    )
+    {
+        std::cout
+            << "\n[!] Failed to write capture file:\n"
+            << "    "
+            << outputFile
+            << '\n';
+
+        return packets;
+    }
+
+    std::cout
         << "\n"
-        << " Saved                "
-        << CAPTURE_FILE
-        << "\n";
-
-    if (packets.empty())
-    {
-        std::cout
-            << "\n[!] No matching IPv4 packets were captured.\n";
-    }
-    else
-    {
-        std::cout
-            << "\n[+] Captured "
-            << packets.size()
-            << " decoded IPv4 packet";
-
-        if (packets.size() != 1)
-            std::cout << "s";
-
-        std::cout
-            << ".\n"
-            << "[*] Capture stored at "
-            << CAPTURE_FILE
-            << "\n"
-            << "[*] Run pkt|:inspect to inspect the capture.\n";
-    }
-
-    SignalHandler::clearStop();
+        << "------------------------------------------------------------\n"
+        << " Capture Summary\n"
+        << "------------------------------------------------------------\n"
+        << "  Interface : "
+        << result.interfaceName
+        << '\n'
+        << "  Duration  : "
+        << result.durationSeconds
+        << " seconds\n"
+        << "  Filter    : "
+        << result.filter
+        << '\n'
+        << "  Packets   : "
+        << packets.size()
+        << '\n'
+        << "  Bytes     : "
+        << result.totalBytes
+        << '\n'
+        << "  Output    : "
+        << outputFile
+        << '\n'
+        << "------------------------------------------------------------\n"
+        << "\n"
+        << "[+] Packet capture completed successfully.\n";
 
     return packets;
 }

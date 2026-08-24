@@ -1,25 +1,164 @@
 #include "network/network_discovery.hpp"
 
 #include "cli/signal_handler.hpp"
+#include "platform/network.hpp"
+
+#include "platform/ping.hpp"
+#include "platform/network.hpp"
 
 #include <chrono>
-
-#include <cstdio>
-
+#include <cstdint>
 #include <cstdlib>
-
 #include <future>
-
+#include <iomanip>
 #include <iostream>
-
-#include <mutex>
-
+#include <sstream>
 #include <string>
-
-#include <thread>
-
 #include <vector>
 
+
+namespace
+{
+
+/*
+ * ============================================================
+ * IPv4 helpers
+ * ============================================================
+ */
+
+uint32_t ipToInteger(
+    const std::string& ip
+)
+{
+    std::stringstream stream(ip);
+
+    uint32_t a = 0;
+    uint32_t b = 0;
+    uint32_t c = 0;
+    uint32_t d = 0;
+
+    char dot1;
+    char dot2;
+    char dot3;
+
+    if (
+        !(stream
+            >> a
+            >> dot1
+            >> b
+            >> dot2
+            >> c
+            >> dot3
+            >> d)
+    )
+    {
+        return 0;
+    }
+
+    if (
+        dot1 != '.' ||
+        dot2 != '.' ||
+        dot3 != '.'
+    )
+    {
+        return 0;
+    }
+
+    if (
+        a > 255 ||
+        b > 255 ||
+        c > 255 ||
+        d > 255
+    )
+    {
+        return 0;
+    }
+
+    return
+        (a << 24) |
+        (b << 16) |
+        (c << 8) |
+        d;
+}
+
+
+std::string integerToIP(
+    uint32_t value
+)
+{
+    std::ostringstream output;
+
+    output
+        << ((value >> 24) & 0xFF)
+        << "."
+        << ((value >> 16) & 0xFF)
+        << "."
+        << ((value >> 8) & 0xFF)
+        << "."
+        << (value & 0xFF);
+
+    return output.str();
+}
+
+
+/*
+ * ============================================================
+ * Terminal formatting helpers
+ * ============================================================
+ */
+
+void printSeparator(
+    char character = '-',
+    int width = 64
+)
+{
+    std::cout
+        << std::string(
+            width,
+            character
+        )
+        << '\n';
+}
+
+
+void printHeader()
+{
+    std::cout << '\n';
+
+    printSeparator('=', 64);
+
+    std::cout
+        << "                    NETWORK DISCOVERY\n";
+
+    printSeparator('=', 64);
+
+    std::cout << '\n';
+}
+
+
+void printField(
+    const std::string& name,
+    const std::string& value
+)
+{
+    std::cout
+        << "  "
+        << std::left
+        << std::setw(14)
+        << name
+        << ": "
+        << value
+        << '\n';
+}
+
+} // namespace
+
+
+/*
+ * ============================================================
+ * Constructor
+ * ============================================================
+ */
 
 NetworkDiscovery::NetworkDiscovery(
     NetworkState& state
@@ -29,265 +168,304 @@ NetworkDiscovery::NetworkDiscovery(
 }
 
 
-std::string NetworkDiscovery::detectLocalIP()
+/*
+ * ============================================================
+ * Detect local network
+ * ============================================================
+ */
+
+NetworkDiscovery::LocalNetwork
+NetworkDiscovery::detectLocalNetwork()
 {
-    FILE* pipe = popen(
-        "ip route get 1.1.1.1 2>/dev/null",
-        "r"
-    );
+    LocalNetwork result;
 
 
-    if (!pipe)
+    const auto interfaces =
+        slipnet::platform::getNetworkInterfaces();
+
+
+    for (
+        const auto& interface :
+        interfaces
+    )
     {
-        return "";
-    }
+        if (!interface.up)
+        {
+            continue;
+        }
 
 
-    char buffer[512];
-
-    std::string output;
-
-
-    while (
-        fgets(
-            buffer,
-            sizeof(buffer),
-            pipe
+        if (
+            interface.ipv4Address.empty()
         )
-    )
-    {
-        output += buffer;
+        {
+            continue;
+        }
+
+
+        if (
+            interface.ipv4Address ==
+            "127.0.0.1"
+        )
+        {
+            continue;
+        }
+
+
+        result.interfaceName =
+            interface.name;
+
+
+        result.ip =
+            interface.ipv4Address;
+
+
+        result.netmask =
+            interface.netmask;
+
+
+        /*
+         * SlipNet v0.1.0 deliberately
+         * uses /24 discovery.
+         */
+        result.prefixLength = 24;
+
+
+        result.network =
+            calculateNetworkAddress(
+                result.ip
+            );
+
+
+        return result;
     }
 
 
-    pclose(pipe);
-
-
-    std::size_t position =
-        output.find("src ");
-
-
-    if (
-        position ==
-        std::string::npos
-    )
-    {
-        return "";
-    }
-
-
-    position += 4;
-
-
-    std::size_t end =
-        output.find(
-            ' ',
-            position
-        );
-
-
-    if (
-        end ==
-        std::string::npos
-    )
-    {
-        end = output.length();
-    }
-
-
-    return output.substr(
-        position,
-        end - position
-    );
+    return result;
 }
 
 
-std::string NetworkDiscovery::calculateNetworkPrefix(
+/*
+ * ============================================================
+ * Calculate /24 network
+ * ============================================================
+ *
+ * Example:
+ *
+ *     10.255.255.254
+ *
+ * becomes:
+ *
+ *     10.255.255.0
+ */
+
+std::string
+NetworkDiscovery::calculateNetworkAddress(
     const std::string& ip
 )
 {
-    std::size_t first =
-        ip.find('.');
+    const uint32_t ipValue =
+        ipToInteger(ip);
 
 
-    if (
-        first ==
-        std::string::npos
-    )
-    {
-        return "";
-    }
+    /*
+     * /24 mask:
+     *
+     * 255.255.255.0
+     */
+    constexpr uint32_t MASK =
+        0xFFFFFF00u;
 
 
-    std::size_t second =
-        ip.find(
-            '.',
-            first + 1
-        );
+    const uint32_t network =
+        ipValue & MASK;
 
 
-    if (
-        second ==
-        std::string::npos
-    )
-    {
-        return "";
-    }
-
-
-    std::size_t third =
-        ip.find(
-            '.',
-            second + 1
-        );
-
-
-    if (
-        third ==
-        std::string::npos
-    )
-    {
-        return "";
-    }
-
-
-    return ip.substr(
-        0,
-        third + 1
+    return integerToIP(
+        network
     );
 }
 
 
-bool NetworkDiscovery::checkHost(
-    const std::string& ip,
-    double& latency
-)
-{
-    auto start =
-        std::chrono::steady_clock::now();
-
-
-    std::string command =
-        "ping -c 1 -W 1 "
-        + ip
-        + " > /dev/null 2>&1";
-
-
-    int result =
-        std::system(
-            command.c_str()
-        );
-
-
-    auto end =
-        std::chrono::steady_clock::now();
-
-
-    latency =
-        std::chrono::duration<double, std::milli>(
-            end - start
-        ).count();
-
-
-    return result == 0;
-}
-
+/*
+ * ============================================================
+ * Network discovery
+ * ============================================================
+ */
 
 bool NetworkDiscovery::discover()
 {
     state.clear();
 
 
+    const auto discoveryStart =
+        std::chrono::steady_clock::now();
+
+
+    printHeader();
+
+
     std::cout
-        << "\n[*] Detecting local network...\n";
+        << "[*] Detecting active network interface...\n";
 
 
-    std::string localIP =
-        detectLocalIP();
+    LocalNetwork network =
+        detectLocalNetwork();
 
 
-    if (localIP.empty())
+    if (
+        network.ip.empty()
+    )
     {
         std::cout
-            << "[!] Could not determine local IP.\n";
+            << "[!] No active IPv4 network interface found.\n";
 
         return false;
     }
-
-
-    std::string prefix =
-        calculateNetworkPrefix(
-            localIP
-        );
-
-
-    if (prefix.empty())
-    {
-        std::cout
-            << "[!] Could not determine network.\n";
-
-        return false;
-    }
-
-
-    std::cout
-        << "[+] Local IP : "
-        << localIP
-        << "\n";
-
-
-    std::cout
-        << "[+] Network  : "
-        << prefix
-        << "0/24\n";
-
-
-    std::cout
-        << "[*] Scanning hosts concurrently...\n";
 
 
     /*
-     * Instead of:
-     *
-     * host 1 → wait
-     * host 2 → wait
-     * host 3 → wait
-     *
-     * we launch several checks simultaneously.
+     * ========================================================
+     * Discovery configuration
+     * ========================================================
      */
 
+    constexpr int PREFIX_LENGTH = 24;
 
-    std::vector<std::future<bool>> tasks;
+    constexpr std::size_t TOTAL_ADDRESSES = 254;
 
-    std::vector<std::string> addresses;
-
-    std::vector<double> latencies;
-
-
-    addresses.reserve(254);
-
-    latencies.resize(254);
+    constexpr std::size_t MAX_CONCURRENT = 32;
 
 
-    for (int host = 1; host <= 254; ++host)
+    std::cout << '\n';
+
+
+    printField(
+        "Interface",
+        network.interfaceName
+    );
+
+
+    printField(
+        "Local IP",
+        network.ip
+    );
+
+
+    printField(
+        "Scan Scope",
+        network.network + "/24"
+    );
+
+
+    printField(
+        "Addresses",
+        std::to_string(
+            TOTAL_ADDRESSES
+        )
+    );
+
+
+    printField(
+        "Concurrency",
+        std::to_string(
+            MAX_CONCURRENT
+        )
+    );
+
+
+    printField(
+        "Mode",
+        "Local IPv4 /24 Discovery"
+    );
+
+
+    std::cout << '\n';
+
+
+    printSeparator();
+
+
+    std::cout
+        << "[*] Discovering active hosts...\n";
+
+
+    printSeparator();
+
+
+    /*
+     * ========================================================
+     * Generate /24 addresses
+     * ========================================================
+     */
+
+    const uint32_t networkValue =
+        ipToInteger(
+            network.network
+        );
+
+
+    const uint32_t firstHost =
+        networkValue + 1;
+
+
+    const uint32_t lastHost =
+        networkValue + 254;
+
+
+    std::vector<std::string>
+        addresses;
+
+
+    addresses.reserve(
+        TOTAL_ADDRESSES
+    );
+
+
+    for (
+        uint32_t current =
+            firstHost;
+
+        current <=
+            lastHost;
+
+        ++current
+    )
     {
         addresses.push_back(
-            prefix +
-            std::to_string(host)
+            integerToIP(
+                current
+            )
         );
     }
+
+
+    std::vector<double>
+        latencies(
+            TOTAL_ADDRESSES,
+            0.0
+        );
+
+
+    std::vector<bool>
+        online(
+            TOTAL_ADDRESSES,
+            false
+        );
+
+
+    /*
+     * ========================================================
+     * Concurrent scanning
+     * ========================================================
+     */
+
+    std::vector<
+        std::future<bool>
+    > tasks;
 
 
     std::size_t completed = 0;
-
-
-    /*
-     * Limit the number of simultaneous
-     * operations to avoid creating hundreds
-     * of processes at once.
-     */
-
-    const std::size_t MAX_CONCURRENT = 32;
 
 
     for (
@@ -301,7 +479,7 @@ bool NetworkDiscovery::discover()
         )
         {
             std::cout
-                << "\n[!] Discovery interrupted.\n";
+                << "\n\n[!] Discovery interrupted.\n";
 
             return false;
         }
@@ -310,22 +488,27 @@ bool NetworkDiscovery::discover()
         tasks.push_back(
             std::async(
                 std::launch::async,
+
                 [this, &addresses, &latencies, i]()
                 {
-                    return checkHost(
-                        addresses[i],
-                        latencies[i]
-                    );
+                    const auto result =
+                        slipnet::platform::pingHost(
+                            addresses[i]
+                        );
+
+                    latencies[i] =
+                        result.latencyMs;
+
+                    return result.reachable;
                 }
             )
         );
 
 
         /*
-         * Once the worker pool reaches
-         * the limit, collect the result.
+         * Process a batch once the
+         * concurrency limit is reached.
          */
-
         if (
             tasks.size() >=
             MAX_CONCURRENT
@@ -337,58 +520,52 @@ bool NetworkDiscovery::discover()
                 ++j
             )
             {
-                bool online =
-                    tasks[j].get();
-
-
-                std::size_t index =
+                const std::size_t index =
                     completed + j;
 
 
-                if (online)
-                {
-                    HostInfo host;
-
-                    host.ip = addresses[index];
-
-                    host.online = true;
-
-                    host.latency_ms =
-                        latencies[index];
-
-                    host.status = "ONLINE";
-
-                    state.addHost(host);
-
-
-                    std::cout
-                        << "[+] Host online: "
-                        << addresses[index]
-                        << " ("
-                        << latencies[index]
-                        << " ms)"
-                        << "\n";
-                }
+                online[index] =
+                    tasks[j].get();
             }
 
 
-            completed += tasks.size();
+            completed +=
+                tasks.size();
+
 
             tasks.clear();
 
 
+            /*
+             * Live progress.
+             */
+            const int percentage =
+                static_cast<int>(
+                    (
+                        completed * 100
+                    ) /
+                    addresses.size()
+                );
+
+
             std::cout
-                << "[*] Progress: "
+                << "\r[*] Progress: "
+                << std::setw(3)
+                << percentage
+                << "%  "
                 << completed
-                << "/254"
-                << "\r"
+                << "/"
+                << addresses.size()
+                << " hosts checked"
                 << std::flush;
         }
     }
 
 
     /*
-     * Collect the final batch.
+     * ========================================================
+     * Final batch
+     * ========================================================
      */
 
     for (
@@ -397,55 +574,218 @@ bool NetworkDiscovery::discover()
         ++j
     )
     {
-        bool online =
-            tasks[j].get();
-
-
-        std::size_t index =
+        const std::size_t index =
             completed + j;
 
 
-        if (online)
-        {
-            HostInfo host;
-
-            host.ip = addresses[index];
-
-            host.online = true;
-
-            host.latency_ms =
-                latencies[index];
-
-            host.status = "ONLINE";
-
-            state.addHost(host);
-
-
-            std::cout
-                << "[+] Host online: "
-                << addresses[index]
-                << " ("
-                << latencies[index]
-                << " ms)"
-                << "\n";
-        }
+        online[index] =
+            tasks[j].get();
     }
 
 
-    std::cout
-        << "\n\n[+] Discovery complete.\n";
+    completed +=
+        tasks.size();
 
 
     std::cout
-        << "[+] Hosts discovered: "
-        << state.getHostCount()
-        << "\n";
+        << "\r[*] Progress: 100%  "
+        << completed
+        << "/"
+        << addresses.size()
+        << " hosts checked"
+        << "            \n";
+
+
+    /*
+     * ========================================================
+     * Store discovered hosts
+     * ========================================================
+     */
+
+    std::size_t onlineCount = 0;
+
+
+    for (
+        std::size_t i = 0;
+        i < addresses.size();
+        ++i
+    )
+    {
+        if (!online[i])
+        {
+            continue;
+        }
+
+
+        ++onlineCount;
+
+
+        HostInfo host;
+
+
+        host.ip =
+            addresses[i];
+
+
+        host.online =
+            true;
+
+
+        host.latency_ms =
+            latencies[i];
+
+
+        host.status =
+            "ONLINE";
+
+
+        state.addHost(
+            host
+        );
+    }
+
+
+    /*
+     * ========================================================
+     * Results table
+     * ========================================================
+     */
+
+    std::cout << '\n';
+
+
+    printSeparator();
 
 
     std::cout
-        << "[+] Hosts online: "
-        << state.getOnlineHostCount()
-        << "\n";
+        << "  "
+        << std::left
+        << std::setw(20)
+        << "IP Address"
+        << std::setw(14)
+        << "Status"
+        << "Latency"
+        << '\n';
+
+
+    printSeparator();
+
+
+    for (
+        std::size_t i = 0;
+        i < addresses.size();
+        ++i
+    )
+    {
+        if (!online[i])
+        {
+            continue;
+        }
+
+
+        std::cout
+            << "  "
+            << std::left
+            << std::setw(20)
+            << addresses[i]
+            << std::setw(14)
+            << "ONLINE";
+
+
+        std::cout
+            << std::fixed
+            << std::setprecision(2)
+            << latencies[i]
+            << " ms"
+            << '\n';
+    }
+
+
+    printSeparator();
+
+
+    /*
+     * ========================================================
+     * Summary
+     * ========================================================
+     */
+
+    const auto discoveryEnd =
+        std::chrono::steady_clock::now();
+
+
+    const double duration =
+        std::chrono::duration<double>(
+            discoveryEnd -
+            discoveryStart
+        ).count();
+
+
+    const std::size_t offlineCount =
+        TOTAL_ADDRESSES -
+        onlineCount;
+
+
+    std::cout
+        << "\n"
+        << " Discovery Summary\n";
+
+
+    printSeparator();
+
+
+    printField(
+        "Scope",
+        network.network + "/24"
+    );
+
+
+    printField(
+        "Addresses",
+        std::to_string(
+            TOTAL_ADDRESSES
+        )
+    );
+
+
+    printField(
+        "Online",
+        std::to_string(
+            onlineCount
+        )
+    );
+
+
+    printField(
+        "Offline",
+        std::to_string(
+            offlineCount
+        )
+    );
+
+
+    {
+        std::ostringstream value;
+
+        value
+            << std::fixed
+            << std::setprecision(2)
+            << duration
+            << " s";
+
+
+        printField(
+            "Duration",
+            value.str()
+        );
+    }
+
+
+    printSeparator();
+
+
+    std::cout
+        << "\n[+] Network discovery completed successfully.\n";
 
 
     return true;

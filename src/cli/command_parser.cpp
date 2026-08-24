@@ -325,6 +325,11 @@ CommandType CommandParser::identifyCommand(
         return CommandType::FIREWALL_PROBE;
     }
 
+    if (normalized == "system|:info")
+    {
+        return CommandType::SYSTEM_INFO;
+    }
+
     /*
      * --------------------------------------------------------
      * Help
@@ -532,6 +537,9 @@ std::string CommandUtilities::commandName(
 
         case CommandType::EXIT:
             return "fire";
+
+        case CommandType::SYSTEM_INFO:
+            return "system|:info";
 
 
         case CommandType::UNKNOWN:
