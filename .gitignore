@@ -36,3 +36,6 @@ data/*
 
 # SlipNet packet capture files
 *.slipcap
+
+# Release packages
+release/

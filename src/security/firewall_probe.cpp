@@ -1,25 +1,33 @@
 #include "security/firewall_probe.hpp"
 
-#include <sstream>
+#include "platform/firewall.hpp"
+
+#include <algorithm>
 
 FirewallState
-FirewallProbe::classify(
-    const PortInfo& port
+FirewallProbe::convertState(
+    int state
 )
 {
-    if (port.open)
-    {
-        return FirewallState::OPEN;
-    }
+    using PlatformState =
+        slipnet::platform::FirewallProbeState;
 
-    /*
-     * The current PortInfo structure only records
-     * whether a port was open.
-     *
-     * Therefore a non-open port cannot safely be
-     * classified as FILTERED.
-     */
-    return FirewallState::CLOSED;
+    switch (
+        static_cast<PlatformState>(state)
+    )
+    {
+        case PlatformState::OPEN:
+            return FirewallState::OPEN;
+
+        case PlatformState::CLOSED:
+            return FirewallState::CLOSED;
+
+        case PlatformState::FILTERED:
+            return FirewallState::FILTERED;
+
+        default:
+            return FirewallState::UNKNOWN;
+    }
 }
 
 std::string
@@ -46,49 +54,63 @@ FirewallProbe::stateName(
 FirewallReport
 FirewallProbe::analyze(
     const std::string& host,
-    const std::vector<PortInfo>& ports
+    const std::vector<int>& ports
 ) const
 {
     FirewallReport report;
 
     report.host = host;
-    report.observed =
-        static_cast<int>(
-            ports.size()
-        );
 
-    for (const auto& port : ports)
+    for (const int port : ports)
     {
+        if (port < 1 || port > 65535)
+        {
+            continue;
+        }
+
+        const auto result =
+            slipnet::platform::probeTCP(
+                host,
+                port,
+                1500
+            );
+
         FirewallObservation observation;
 
         observation.host = host;
-        observation.port = port.port;
+        observation.port = port;
+        observation.latencyMs =
+            result.latencyMs;
 
         observation.state =
-            classify(port);
+            convertState(
+                static_cast<int>(
+                    result.state
+                )
+            );
+
+        observation.evidence =
+            result.evidence;
+
+        ++report.observed;
 
         switch (observation.state)
         {
             case FirewallState::OPEN:
                 ++report.open;
-
-                observation.evidence =
-                    "TCP service responded as open.";
                 break;
 
             case FirewallState::CLOSED:
                 ++report.closed;
-
-                observation.evidence =
-                    "Port was scanned but was not observed "
-                    "as open. This alone does not prove filtering.";
                 break;
 
-            default:
-                ++report.unknown;
+            case FirewallState::FILTERED:
+                ++report.filtered;
+                report.hasEvidenceOfFiltering = true;
+                break;
 
-                observation.evidence =
-                    "Insufficient evidence for classification.";
+            case FirewallState::UNKNOWN:
+                ++report.unknown;
                 break;
         }
 
@@ -97,25 +119,18 @@ FirewallProbe::analyze(
         );
     }
 
-    /*
-     * With the current scanner data we cannot honestly
-     * identify filtered ports.
-     */
-    report.hasEvidenceOfFiltering = false;
-
     if (report.observed == 0)
     {
         report.conclusion =
-            "No port observations are available.";
+            "No valid TCP ports were available for probing.";
     }
-    else if (
-        report.open == report.observed
-    )
+    else if (report.filtered > 0)
     {
         report.conclusion =
-            "All observed ports were reachable as open. "
-            "No firewall filtering can be inferred from "
-            "the current dataset.";
+            "Filtering behavior was observed on one or more "
+            "TCP ports. This indicates packet filtering or "
+            "silent traffic dropping, but does not identify "
+            "a specific firewall product.";
     }
     else if (
         report.open > 0 &&
@@ -123,15 +138,28 @@ FirewallProbe::analyze(
     )
     {
         report.conclusion =
-            "Both open and non-open ports were observed. "
-            "The current scanner cannot distinguish closed "
-            "ports from firewall filtering.";
+            "Both reachable and explicitly refused TCP ports "
+            "were observed. No filtering behavior was directly "
+            "identified in the tested ports.";
+    }
+    else if (report.open > 0)
+    {
+        report.conclusion =
+            "The tested ports responded as reachable. "
+            "No filtering behavior was directly observed.";
+    }
+    else if (report.closed == report.observed)
+    {
+        report.conclusion =
+            "All tested ports explicitly refused the TCP "
+            "connection. No filtering behavior was directly "
+            "observed.";
     }
     else
     {
         report.conclusion =
-            "No scanned ports were observed as open. "
-            "This does not establish that a firewall is present.";
+            "The available observations were insufficient "
+            "to determine firewall behavior.";
     }
 
     return report;

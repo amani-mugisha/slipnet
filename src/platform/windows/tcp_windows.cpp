@@ -258,6 +258,17 @@ std::string tcpReceive(
             connection.handle
         );
 
+    if (
+        !waitForSocket(
+            socketFd,
+            false,
+            2000
+        )
+    )
+    {
+        return {};
+    }
+
     std::string result;
 
     result.resize(

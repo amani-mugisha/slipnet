@@ -1,10 +1,7 @@
 #include "network/host_scanner.hpp"
 
 #include "cli/signal_handler.hpp"
-
-#include <chrono>
-
-#include <cstdlib>
+#include "platform/ping.hpp"
 
 #include <iostream>
 
@@ -22,33 +19,26 @@ bool HostScanner::ping(
     double& latency
 )
 {
-    auto start =
-        std::chrono::steady_clock::now();
-
-
-    std::string command =
-        "ping -c 1 -W 1 "
-        + ip
-        + " > /dev/null 2>&1";
-
-
-    int result =
-        std::system(
-            command.c_str()
+    /*
+     * Platform-independent interface.
+     *
+     * Linux:
+     *     src/platform/linux/ping_linux.cpp
+     *
+     * Windows:
+     *     src/platform/windows/ping_windows.cpp
+     */
+    const auto result =
+        slipnet::platform::pingHost(
+            ip
         );
 
 
-    auto end =
-        std::chrono::steady_clock::now();
-
-
     latency =
-        std::chrono::duration<double, std::milli>(
-            end - start
-        ).count();
+        result.latencyMs;
 
 
-    return result == 0;
+    return result.reachable;
 }
 
 
@@ -73,7 +63,7 @@ bool HostScanner::scan(
     double latency = 0.0;
 
 
-    bool online =
+    const bool online =
         ping(
             ip,
             latency
@@ -82,16 +72,20 @@ bool HostScanner::scan(
 
     HostInfo host;
 
-    host.ip = ip;
+    host.ip =
+        ip;
 
-    host.online = online;
+    host.online =
+        online;
 
-    host.latency_ms = latency;
+    host.latency_ms =
+        latency;
 
 
     if (online)
     {
-        host.status = "ONLINE";
+        host.status =
+            "ONLINE";
 
         std::cout
             << "[+] Host is ONLINE\n";
@@ -103,14 +97,17 @@ bool HostScanner::scan(
     }
     else
     {
-        host.status = "OFFLINE";
+        host.status =
+            "OFFLINE";
 
         std::cout
             << "[-] Host is OFFLINE\n";
     }
 
 
-    state.addHost(host);
+    state.addHost(
+        host
+    );
 
 
     return online;

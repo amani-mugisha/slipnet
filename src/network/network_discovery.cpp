@@ -20,12 +20,7 @@
 namespace
 {
 
-/*
- * ============================================================
- * IPv4 helpers
- * ============================================================
- */
-
+//------------------------IPv4 helpers---------------------
 uint32_t ipToInteger(
     const std::string& ip
 )
@@ -153,13 +148,7 @@ void printField(
 
 } // namespace
 
-
-/*
- * ============================================================
- * Constructor
- * ============================================================
- */
-
+//--------------Constructor-----------
 NetworkDiscovery::NetworkDiscovery(
     NetworkState& state
 )
@@ -167,13 +156,7 @@ NetworkDiscovery::NetworkDiscovery(
 {
 }
 
-
-/*
- * ============================================================
- * Detect local network
- * ============================================================
- */
-
+//---------------------- Detect local network--------------
 NetworkDiscovery::LocalNetwork
 NetworkDiscovery::detectLocalNetwork()
 {
@@ -244,21 +227,6 @@ NetworkDiscovery::detectLocalNetwork()
     return result;
 }
 
-
-/*
- * ============================================================
- * Calculate /24 network
- * ============================================================
- *
- * Example:
- *
- *     10.255.255.254
- *
- * becomes:
- *
- *     10.255.255.0
- */
-
 std::string
 NetworkDiscovery::calculateNetworkAddress(
     const std::string& ip
@@ -267,12 +235,6 @@ NetworkDiscovery::calculateNetworkAddress(
     const uint32_t ipValue =
         ipToInteger(ip);
 
-
-    /*
-     * /24 mask:
-     *
-     * 255.255.255.0
-     */
     constexpr uint32_t MASK =
         0xFFFFFF00u;
 
@@ -287,12 +249,7 @@ NetworkDiscovery::calculateNetworkAddress(
 }
 
 
-/*
- * ============================================================
- * Network discovery
- * ============================================================
- */
-
+//------------------ Network discovery-------------
 bool NetworkDiscovery::discover()
 {
     state.clear();
@@ -323,13 +280,7 @@ bool NetworkDiscovery::discover()
         return false;
     }
 
-
-    /*
-     * ========================================================
-     * Discovery configuration
-     * ========================================================
-     */
-
+    //-----------------Discovery configuration-----------
     constexpr int PREFIX_LENGTH = 24;
 
     constexpr std::size_t TOTAL_ADDRESSES = 254;
@@ -393,12 +344,7 @@ bool NetworkDiscovery::discover()
     printSeparator();
 
 
-    /*
-     * ========================================================
-     * Generate /24 addresses
-     * ========================================================
-     */
-
+    //-----------------Generate /24 addresses------------
     const uint32_t networkValue =
         ipToInteger(
             network.network
@@ -453,13 +399,7 @@ bool NetworkDiscovery::discover()
             false
         );
 
-
-    /*
-     * ========================================================
-     * Concurrent scanning
-     * ========================================================
-     */
-
+    //------------ Concurrent scanning---------------
     std::vector<
         std::future<bool>
     > tasks;
@@ -504,11 +444,8 @@ bool NetworkDiscovery::discover()
             )
         );
 
-
-        /*
-         * Process a batch once the
-         * concurrency limit is reached.
-         */
+        // Process a batch once the
+        // concurrency limit is reached.
         if (
             tasks.size() >=
             MAX_CONCURRENT
@@ -536,9 +473,7 @@ bool NetworkDiscovery::discover()
             tasks.clear();
 
 
-            /*
-             * Live progress.
-             */
+            // Live progress.
             const int percentage =
                 static_cast<int>(
                     (
@@ -562,12 +497,8 @@ bool NetworkDiscovery::discover()
     }
 
 
-    /*
-     * ========================================================
-     * Final batch
-     * ========================================================
-     */
 
+    //----------------- Final batch--------------
     for (
         std::size_t j = 0;
         j < tasks.size();
@@ -595,13 +526,7 @@ bool NetworkDiscovery::discover()
         << " hosts checked"
         << "            \n";
 
-
-    /*
-     * ========================================================
-     * Store discovered hosts
-     * ========================================================
-     */
-
+    //Store discovered hosts
     std::size_t onlineCount = 0;
 
 
@@ -645,17 +570,10 @@ bool NetworkDiscovery::discover()
     }
 
 
-    /*
-     * ========================================================
-     * Results table
-     * ========================================================
-     */
-
+    //------------ Results table--------------
     std::cout << '\n';
 
-
     printSeparator();
-
 
     std::cout
         << "  "
@@ -704,11 +622,7 @@ bool NetworkDiscovery::discover()
     printSeparator();
 
 
-    /*
-     * ========================================================
-     * Summary
-     * ========================================================
-     */
+    //---------------- Summary---------------
 
     const auto discoveryEnd =
         std::chrono::steady_clock::now();

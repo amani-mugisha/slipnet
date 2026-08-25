@@ -6,25 +6,6 @@
 #include "core/network_state.hpp"
 #include "security/alert.hpp"
 
-/*
- * SlipNet Security Detector
- *
- * Passive security-analysis engine.
- *
- * IMPORTANT:
- * This component does not perform network connections,
- * authentication attempts, exploitation, or vulnerability
- * probing.
- *
- * It analyzes information already collected by SlipNet:
- *
- *     ip|:seek
- *     port|:scan
- *     svc|:detect
- *
- * The same implementation is therefore usable on both
- * Linux and Windows.
- */
 class SecurityDetector
 {
 public:

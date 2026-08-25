@@ -1,10 +1,8 @@
 #include "network/os_fingerprint.hpp"
+#include "platform/os_fingerprint.hpp"
 
-#include <cstdio>
-#include <regex>
-#include <string>
-
-OSFingerprint OSFingerprinter::fingerprint(
+OSFingerprint
+OSFingerprinter::fingerprint(
     const std::string& target
 ) const
 {
@@ -13,87 +11,56 @@ OSFingerprint OSFingerprinter::fingerprint(
     result.target = target;
 
     /*
-     * Linux ping output commonly contains:
+     * --------------------------------------------------------
+     * Platform probe
+     * --------------------------------------------------------
      *
-     * ttl=64
+     * The actual ICMP/ping implementation is platform-specific.
      *
-     * Windows commonly:
+     * Linux  -> Linux platform implementation
+     * Windows -> Windows platform implementation
      *
-     * TTL=128
-     *
-     * Network devices often:
-     *
-     * TTL=255
-     *
-     * This is a heuristic, not proof.
+     * The resulting TTL is interpreted here.
      */
 
-    std::string command =
-        "ping -c 1 -W 2 " +
-        target +
-        " 2>/dev/null";
-
-    FILE* pipe =
-        popen(
-            command.c_str(),
-            "r"
+    const auto probe =
+        slipnet::platform::fingerprintHost(
+            target
         );
 
-    if (!pipe)
+    if (!probe.reachable)
     {
         return result;
     }
 
-    char buffer[512];
+    const int ttl =
+        probe.ttl;
 
-    std::string output;
-
-    while (
-        fgets(
-            buffer,
-            sizeof(buffer),
-            pipe
-        )
-    )
-    {
-        output += buffer;
-    }
-
-    pclose(pipe);
-
-    std::regex ttlRegex(
-        R"((?:ttl|TTL)[=|:](\d+))"
-    );
-
-    std::smatch match;
-
-    if (
-        !std::regex_search(
-            output,
-            match,
-            ttlRegex
-        )
-    )
+    if (ttl <= 0)
     {
         return result;
     }
 
-    int ttl;
+    result.ttl =
+        ttl;
 
-    try
-    {
-        ttl =
-            std::stoi(
-                match[1].str()
-            );
-    }
-    catch (...)
-    {
-        return result;
-    }
+    result.detected =
+        true;
 
-    result.ttl = ttl;
-    result.detected = true;
+
+    /*
+     * --------------------------------------------------------
+     * TTL heuristic
+     * --------------------------------------------------------
+     *
+     * Typical initial TTL values:
+     *
+     *   Linux / Unix-like       64
+     *   Windows                128
+     *   Network appliances     255
+     *
+     * This is a heuristic and does NOT prove the OS.
+     */
 
     if (ttl <= 64)
     {

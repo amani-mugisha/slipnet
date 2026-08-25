@@ -1,7 +1,6 @@
 #include "cli/command_handler.hpp"
 #include <iomanip>
 #include "cli/signal_handler.hpp"
-#include "monitoring/network_monitor.hpp"
 #include "network/host_scanner.hpp"
 #include "network/network_discovery.hpp"
 #include "host/host_discovery.hpp"
@@ -15,6 +14,7 @@
 #include "security/security_detector.hpp"
 #include "platform/route.hpp"
 #include "platform/topology.hpp"
+#include "platform/session.hpp"
 #include "ai/analyzer.hpp"
 #include <cstdlib>
 #include <fstream>
@@ -30,10 +30,6 @@
 #include "network/banner_grabber.hpp"
 #include "network/subnet_calculator.hpp"
 #include "system/system_info.hpp"
-#include <arpa/inet.h>
-
-#include <iomanip>
-#include "security/security_detector.hpp"
 #include "security/vulnerability_scanner.hpp"
 #include "security/credential_checker.hpp"
 #include "security/ssl_auditor.hpp"
@@ -283,9 +279,12 @@ SECURITY
       Audit credential exposure for one host.
 
   ssl|:audit <HOST[:PORT]>
+  ssl|:audit <dname>
       Perform a TLS certificate and protocol audit.
 
+  firewall|:probe
   firewall|:probe <IP>
+  firewall|:probe <IP> <PORT>
       Analyze observed port states and firewall indicators.
       
   SECURITY NOTES
@@ -364,23 +363,99 @@ void CommandHandler::handleHostFind(
     const ParsedCommand& command
 )
 {
-    if (command.arguments.empty())
+    if (command.arguments.size() != 1)
     {
         std::cout
-            << "Usage: host|:find <IP>\n";
+            << "\n"
+            << "Usage: host|:find <IP>\n"
+            << "\n"
+            << "Examples:\n"
+            << "  host|:find 192.168.1.10\n"
+            << "  host|:find 10.108.155.140\n"
+            << "\n"
+            << "Use ip|:seek for network discovery.\n";
 
         return;
     }
 
 
-    HostScanner scanner(
-        context.network
-    );
+    const std::string& target =
+        command.arguments[0];
 
 
-    scanner.scan(
-        command.arguments[0]
-    );
+    std::cout
+        << "\n"
+        << "[*] Checking host: "
+        << target
+        << "\n";
+
+
+    /*
+     * --------------------------------------------------------
+     * CIDR validation
+     * --------------------------------------------------------
+     *
+     * host|:find is intentionally a single-host operation.
+     *
+     * Network ranges belong to:
+     *
+     *     ip|:seek
+     *
+     * Therefore we reject CIDR notation here instead of
+     * incorrectly reporting the entire network as offline.
+     */
+
+    if (
+        target.find('/') !=
+        std::string::npos
+    )
+    {
+        std::cout
+            << "\n"
+            << "[!] Invalid host target.\n"
+            << "[*] CIDR notation is not valid for host lookup.\n"
+            << "[*] Use ip|:seek for network discovery.\n";
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * Host discovery
+     * --------------------------------------------------------
+     */
+
+    HostDiscovery discovery;
+
+    const Host host =
+        discovery.check(
+            target
+        );
+
+
+    /*
+     * --------------------------------------------------------
+     * Result
+     * --------------------------------------------------------
+     */
+
+    if (host.reachable)
+    {
+        std::cout
+            << "[+] Host is ONLINE\n"
+            << "[+] Latency: "
+            << std::fixed
+            << std::setprecision(2)
+            << host.latencyMs
+            << " ms\n";
+    }
+    else
+    {
+        std::cout
+            << "[-] Host is OFFLINE\n"
+            << "[*] No response was received from the target.\n";
+    }
 }
 
 
@@ -636,12 +711,7 @@ void CommandHandler::handleTopologyMap(
     const auto& hosts =
         context.network.getHosts();
 
-    /*
-     * ------------------------------------------------------------
-     * Require discovered network information.
-     * ------------------------------------------------------------
-     */
-
+    // --------- Require discovered network information.---------
     if (hosts.empty())
     {
         std::cout
@@ -658,36 +728,26 @@ void CommandHandler::handleTopologyMap(
         return;
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Create topology mapper.
-     * ------------------------------------------------------------
-     */
 
+    // -------------- Create topology mapper.------------
     TopologyMapper mapper;
 
-    /*
-     * ------------------------------------------------------------
-     * Get local network interfaces.
-     *
-     * This is platform independent:
-     *
-     * Linux   -> network_linux.cpp
-     * Windows -> network_windows.cpp
-     * ------------------------------------------------------------
-     */
+
+    // -------Get local network interfaces.----------
+     
+    // This is platform independent:
+    // Linux   -> network_linux.cpp
+    // Windows -> network_windows.cpp
 
     const auto interfaces =
         slipnet::platform::getNetworkInterfaces();
 
-    /*
-     * ------------------------------------------------------------
-     * Get local topology information.
-     *
-     * Linux   -> topology_linux.cpp
-     * Windows -> topology_windows.cpp
-     * ------------------------------------------------------------
-     */
+
+    //-------- Get local topology information.---------
+     
+    // Linux   -> topology_linux.cpp
+    // Windows -> topology_windows.cpp
+
 
     const auto topologyInfo =
         slipnet::platform::getLocalTopologyInfo();
@@ -698,12 +758,8 @@ void CommandHandler::handleTopologyMap(
     const std::string gatewayIP =
         topologyInfo.gatewayAddress;
 
-    /*
-     * ------------------------------------------------------------
-     * Add active local interfaces.
-     * ------------------------------------------------------------
-     */
 
+    //--------- Add active local interfaces.---------
     for (const auto& interface : interfaces)
     {
         if (!interface.up)
@@ -736,12 +792,8 @@ void CommandHandler::handleTopologyMap(
         mapper.addNode(node);
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Add discovered hosts.
-     * ------------------------------------------------------------
-     */
 
+    //----------- Add discovered hosts.----------------
     for (const auto& host : hosts)
     {
         if (!host.online)
@@ -749,9 +801,7 @@ void CommandHandler::handleTopologyMap(
             continue;
         }
 
-        /*
-         * Do not duplicate the local machine as a HOST node.
-         */
+        // Do not duplicate the local machine as a HOST node.
         if (
             !localIP.empty() &&
             host.ip == localIP
@@ -760,9 +810,7 @@ void CommandHandler::handleTopologyMap(
             continue;
         }
 
-        /*
-         * Gateway gets a special topology role.
-         */
+        // Gateway gets a special topology role.
         const bool isGateway =
             !gatewayIP.empty() &&
             host.ip == gatewayIP;
@@ -785,15 +833,9 @@ void CommandHandler::handleTopologyMap(
         mapper.addNode(node);
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Connect local machine to gateway.
-     *
-     * This relationship is supported by actual routing
-     * information, so it is safe to represent.
-     * ------------------------------------------------------------
-     */
-
+    // Connect local machine to gateway.
+    // This relationship is supported by actual routing
+    // information, so it is safe to represent.
     if (
         !localIP.empty() &&
         !gatewayIP.empty()
@@ -810,15 +852,9 @@ void CommandHandler::handleTopologyMap(
         mapper.addEdge(edge);
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Connect local machine to discovered hosts.
-     *
-     * These are logical relationships, NOT claims about
-     * physical switches or routers.
-     * ------------------------------------------------------------
-     */
-
+    // Connect local machine to discovered hosts.
+    // These are logical relationships, NOT claims about
+    // physical switches or routers.
     if (!localIP.empty())
     {
         for (const auto& host : hosts)
@@ -833,9 +869,7 @@ void CommandHandler::handleTopologyMap(
                 continue;
             }
 
-            /*
-             * Avoid adding the gateway twice.
-             */
+            // Avoid adding the gateway twice.
             if (
                 !gatewayIP.empty() &&
                 host.ip == gatewayIP
@@ -856,11 +890,9 @@ void CommandHandler::handleTopologyMap(
         }
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Display topology.
-     * ------------------------------------------------------------
-     */
+
+    // Display topology.
+
 
     mapper.display();
 
@@ -880,16 +912,12 @@ void CommandHandler::handlePacketCapture(
 
     std::string filter = "ALL";
 
-    /*
-     * ------------------------------------------------------------
-     * Arguments
-     *
-     * pkt|:capture
-     * pkt|:capture <interface>
-     * pkt|:capture <interface> <seconds>
-     * pkt|:capture <interface> <seconds> <filter>
-     * ------------------------------------------------------------
-     */
+
+    //------------ Arguments-----------------
+    // pkt|:capture
+    // pkt|:capture <interface>
+    // pkt|:capture <interface> <seconds>
+    // pkt|:capture <interface> <seconds> <filter>
 
     if (command.arguments.size() > 3)
     {
@@ -909,13 +937,7 @@ void CommandHandler::handlePacketCapture(
         return;
     }
 
-
-    /*
-     * ------------------------------------------------------------
-     * Interface
-     * ------------------------------------------------------------
-     */
-
+    // -------------- Interface------------
     if (command.arguments.empty())
     {
         slipnet::monitoring::NetworkMonitor monitor;
@@ -937,13 +959,7 @@ void CommandHandler::handlePacketCapture(
             command.arguments[0];
     }
 
-
-    /*
-     * ------------------------------------------------------------
-     * Duration
-     * ------------------------------------------------------------
-     */
-
+    // ----------------Duration----------------
     if (command.arguments.size() >= 2)
     {
         try
@@ -977,19 +993,12 @@ void CommandHandler::handlePacketCapture(
         return;
     }
 
-
-    /*
-     * ------------------------------------------------------------
-     * Filter
-     * ------------------------------------------------------------
-     */
-
+    // ----------------Filter--------------
     if (command.arguments.size() >= 3)
     {
         filter =
             command.arguments[2];
     }
-
 
     std::transform(
         filter.begin(),
@@ -1021,13 +1030,7 @@ void CommandHandler::handlePacketCapture(
         return;
     }
 
-
-    /*
-     * ------------------------------------------------------------
-     * Start capture
-     * ------------------------------------------------------------
-     */
-
+    //--------------------- Start capture-----------------
     std::cout
         << "\n============================================================\n"
         << "                    PACKET CAPTURE\n"
@@ -1061,15 +1064,8 @@ void CommandHandler::handlePacketCapture(
 
     SignalHandler::clearStop();
 
-
-    /*
-     * ------------------------------------------------------------
-     * Summary
-     * ------------------------------------------------------------
-     */
-
+    //----------------- Summary--------------------
     std::uint64_t totalBytes = 0;
-
     std::size_t tcpCount = 0;
     std::size_t udpCount = 0;
     std::size_t icmpCount = 0;
@@ -1148,11 +1144,8 @@ void CommandHandler::handlePacketInspect(
     const std::string defaultFile =
         "data/last_capture.txt";
 
-    /*
-     * No argument:
-     *
-     * Inspect the most recent capture.
-     */
+    // No argument:
+    // Inspect the most recent capture.
     if (command.arguments.empty())
     {
         std::cout
@@ -1165,9 +1158,7 @@ void CommandHandler::handlePacketInspect(
         return;
     }
 
-    /*
-     * More than one argument is invalid.
-     */
+    // More than one argument is invalid.
     if (command.arguments.size() > 1)
     {
         std::cout
@@ -1183,9 +1174,7 @@ void CommandHandler::handlePacketInspect(
     const std::string argument =
         command.arguments[0];
 
-    /*
-     * Determine whether the argument is a packet ID.
-     */
+    // Determine whether the argument is a packet ID.
     bool numeric = !argument.empty();
 
     for (char c : argument)
@@ -1233,9 +1222,7 @@ void CommandHandler::handlePacketInspect(
         return;
     }
 
-    /*
-     * Otherwise treat it as a capture filename.
-     */
+    // Otherwise treat it as a capture filename.
     std::cout
         << "\n[*] Inspecting capture file:\n"
         << "    "
@@ -1253,14 +1240,11 @@ void CommandHandler::handleNetworkMonitor(
 {
     slipnet::monitoring::NetworkMonitor monitor;
 
-    /*
-     * Supported:
-     *
-     * net|:monitor
-     * net|:monitor <interface>
-     * net|:monitor <interface> <interval>
-     */
-
+    //  --------Supported:------------
+    
+    // net|:monitor
+    // net|:monitor <interface>
+    // net|:monitor <interface> <interval>
     if (command.arguments.size() > 2)
     {
         std::cout
@@ -1273,12 +1257,7 @@ void CommandHandler::handleNetworkMonitor(
         return;
     }
 
-    /*
-     * --------------------------------------------------------
-     * Interface
-     * --------------------------------------------------------
-     */
-
+    //---------------- Interface--------------------
     std::string interfaceName;
 
     if (command.arguments.empty())
@@ -1308,12 +1287,7 @@ void CommandHandler::handleNetworkMonitor(
         }
     }
 
-    /*
-     * --------------------------------------------------------
-     * Sampling interval
-     * --------------------------------------------------------
-     */
-
+    //--------------------- Sampling interval-------------------
     int intervalSeconds = 1;
 
     if (command.arguments.size() == 2)
@@ -1360,12 +1334,7 @@ void CommandHandler::handleNetworkMonitor(
         }
     }
 
-    /*
-     * --------------------------------------------------------
-     * Start monitor
-     * --------------------------------------------------------
-     */
-
+    // -------------- Start monitor--------------
     std::cout
         << "\n"
         << "============================================================\n"
@@ -1428,12 +1397,7 @@ void CommandHandler::handleNetworkShow(
         }
     }
 
-    /*
-     * ========================================================
-     * NETWORK STATE
-     * ========================================================
-     */
-
+    //----------------- NETWORK STATE----------------
     std::cout
         << "\n"
         << "============================================================\n"
@@ -1441,10 +1405,7 @@ void CommandHandler::handleNetworkShow(
         << "============================================================\n"
         << "\n";
 
-    /*
-     * Summary
-     */
-
+    //------------ Summary---------------------
     std::cout
         << "SUMMARY\n"
         << "------------------------------------------------------------\n"
@@ -1468,12 +1429,7 @@ void CommandHandler::handleNetworkShow(
         << services.size()
         << '\n';
 
-    /*
-     * ========================================================
-     * HOSTS
-     * ========================================================
-     */
-
+    //------------------ HOSTS--------------------
     std::cout
         << "\n"
         << "HOSTS\n"
@@ -1541,12 +1497,7 @@ void CommandHandler::handleNetworkShow(
         }
     }
 
-    /*
-     * ========================================================
-     * OPEN PORTS
-     * ========================================================
-     */
-
+    //-------------------------- OPEN PORTS------------------
     std::cout
         << "\n"
         << "OPEN PORTS\n"
@@ -1608,12 +1559,7 @@ void CommandHandler::handleNetworkShow(
         }
     }
 
-    /*
-     * ========================================================
-     * SERVICES
-     * ========================================================
-     */
-
+    //----------------- SERVICES---------------------
     std::cout
         << "\n"
         << "DETECTED SERVICES\n"
@@ -1672,12 +1618,8 @@ void CommandHandler::handleNetworkShow(
         }
     }
 
-    /*
-     * ========================================================
-     * END
-     * ========================================================
-     */
 
+    //----------------- END---------------
     std::cout
         << "\n"
         << "============================================================\n"
@@ -1701,9 +1643,8 @@ void CommandHandler::handleNetworkClear(
 
     std::size_t openPortsBefore = 0;
 
-    /*
-     * Count open ports before clearing the state.
-     */
+    
+    // Count open ports before clearing the state.
     for (const auto& host :
          context.network.getHosts())
     {
@@ -1719,22 +1660,16 @@ void CommandHandler::handleNetworkClear(
         }
     }
 
-    /*
-     * Clear all collected network intelligence.
-     */
+    // Clear all collected network intelligence.
     context.network.clear();
 
-    /*
-     * Verify that the state was actually cleared.
-     */
+    // Verify that the state was actually cleared.
     const bool cleared =
         context.network.getHostCount() == 0 &&
         context.network.getOnlineHostCount() == 0 &&
         context.network.getServices().empty();
 
-    /*
-     * Display result.
-     */
+    // Display result.
     std::cout
         << "\n"
         << "============================================================\n"
@@ -1810,12 +1745,7 @@ void CommandHandler::handleSecurityDetect(
         << " Probing     : Disabled\n"
         << " Exploitation: Disabled\n";
 
-    /*
-     * --------------------------------------------------------
-     * Argument validation
-     * --------------------------------------------------------
-     */
-
+    //---------------- Argument validation-----------------------
     if (command.arguments.size() > 1)
     {
         std::cout
@@ -1850,12 +1780,7 @@ void CommandHandler::handleSecurityDetect(
         return;
     }
 
-    /*
-     * --------------------------------------------------------
-     * Determine analysis scope
-     * --------------------------------------------------------
-     */
-
+    //------------------- Determine analysis scope----------------
     std::string targetIp;
 
     if (!command.arguments.empty())
@@ -1902,12 +1827,8 @@ void CommandHandler::handleSecurityDetect(
     std::size_t lowAlerts = 0;
     std::size_t infoAlerts = 0;
 
-    /*
-     * --------------------------------------------------------
-     * Analyze hosts
-     * --------------------------------------------------------
-     */
 
+    //--------------- Analyze hosts---------------
     for (const auto& host : hosts)
     {
         if (
@@ -2039,12 +1960,8 @@ void CommandHandler::handleSecurityDetect(
         }
     }
 
-    /*
-     * --------------------------------------------------------
-     * Summary
-     * --------------------------------------------------------
-     */
 
+    //-----------------------Summary--------------------
     std::cout
         << "\n"
         << "============================================================\n"
@@ -2104,61 +2021,125 @@ void CommandHandler::handleAIAnalyze(
     std::cout << "[!] AI analysis engine is not connected yet.\n";
 }
 
-
 void CommandHandler::handleSessionInfo(
     const ParsedCommand&
 )
 {
-    std::size_t portCount = 0;
 
-    for (const auto& host :
-         context.network.getHosts())
+    //----------------- Platform information-------------------------
+    const auto platformInfo =
+        slipnet::platform::getSessionPlatformInfo();
+
+    //-------------- Network state--------------
+    std::size_t discoveredPorts = 0;
+
+    std::size_t openPorts = 0;
+
+    for (
+        const auto& host :
+        context.network.getHosts()
+    )
     {
-        portCount +=
-            context.network
-                .getPorts(host.ip)
-                .size();
+        const auto& ports =
+            context.network.getPorts(
+                host.ip
+            );
+
+        discoveredPorts +=
+            ports.size();
+
+        for (const auto& port : ports)
+        {
+            if (port.open)
+            {
+                ++openPorts;
+            }
+        }
     }
+
+    //----------------- Services---------------
+    const std::size_t serviceCount =
+        context.network
+            .getServices()
+            .size();
+
+    //--------------- Session information-------------------
+    std::cout
+        << "\n"
+        << "================================================================\n"
+        << "                    SESSION INFORMATION\n"
+        << "================================================================\n";
+
+    //------------------- SlipNet----------------
+    std::cout
+        << "\n"
+        << " SlipNet\n"
+        << "----------------------------------------------------------------\n"
+        << "  Version          : "
+        << context.version
+        << "\n"
+        << "  Session state    : "
+        << (
+            context.running
+                ? "ACTIVE"
+                : "STOPPED"
+        )
+        << "\n"
+        << "  Operating mode   : CLI\n";
+
+    //----------- Platform--------------
+    std::cout
+        << "\n"
+        << " Platform\n"
+        << "----------------------------------------------------------------\n"
+        << "  Operating system : "
+        << platformInfo.operatingSystem
+        << "\n"
+        << "  Architecture     : "
+        << platformInfo.architecture
+        << "\n"
+        << "  Hostname         : "
+        << platformInfo.hostname
+        << "\n";
+
+    //------------------Network state----------------
+    std::cout
+        << "\n"
+        << " Network State\n"
+        << "----------------------------------------------------------------\n"
+        << "  Hosts discovered : "
+        << context.network.getHostCount()
+        << "\n"
+        << "  Hosts online     : "
+        << context.network.getOnlineHostCount()
+        << "\n"
+        << "  Ports discovered : "
+        << discoveredPorts
+        << "\n"
+        << "  Open ports       : "
+        << openPorts
+        << "\n"
+        << "  Services         : "
+        << serviceCount
+        << "\n";
+
+    //---------------- Session notes----------------------
+    std::cout
+        << "\n"
+        << " Session Notes\n"
+        << "----------------------------------------------------------------\n"
+        << "  Network data     : In-memory\n"
+        << "  Persistence      : Not enabled\n"
+        << "  Platform backend : "
+        << platformInfo.operatingSystem
+        << "\n";
+
 
     std::cout
         << "\n"
-        << "============================================================\n"
-        << "                    SESSION INFORMATION\n"
-        << "============================================================\n";
-
-    std::cout
-        << "SlipNet version : "
-        << context.version
-        << '\n';
-
-    std::cout
-        << "Running         : "
-        << (context.running ? "YES" : "NO")
-        << '\n';
-
-    std::cout
-        << "Hosts           : "
-        << context.network.getHostCount()
-        << '\n';
-
-    std::cout
-        << "Online hosts    : "
-        << context.network.getOnlineHostCount()
-        << '\n';
-
-    std::cout
-        << "Stored ports    : "
-        << portCount
-        << '\n';
-
-    std::cout
-        << "Services        : "
-        << context.network.getServices().size()
-        << '\n';
-
-    std::cout
-        << "============================================================\n";
+        << "================================================================\n";
 }
+
 
 void CommandHandler::handleMacResolve(
     const ParsedCommand& command
@@ -2212,73 +2193,180 @@ void CommandHandler::handleDnsResolve(
     if (command.arguments.size() != 1)
     {
         std::cout
-            << "\nUsage: dns|:resolve <hostname|IP>\n";
+            << "\n"
+            << "Usage: dns|:resolve <hostname|IP>\n";
 
         return;
     }
 
+    const std::string& input =
+        command.arguments[0];
+
+    std::cout
+        << "\n"
+        << "[*] Resolving DNS information for "
+        << input
+        << "...\n";
+
     DNSResolver resolver;
 
-    DNSResult result =
-        resolver.resolve(
-            command.arguments[0]
-        );
+    const DNSResult result =
+        resolver.resolve(input);
+
+    const bool inputIsIP =
+        resolver.isIPAddress(result.input);
 
     std::cout
-        << "\n============================================================\n"
-        << "                       DNS RESOLUTION\n"
-        << "============================================================\n";
-
-    std::cout
-        << "Input : "
+        << "\n"
+        << "============================================================\n"
+        << "                 SLIPNET :: DNS RESOLUTION\n"
+        << "============================================================\n"
+        << "\n"
+        << " INPUT\n"
+        << "------------------------------------------------------------\n"
+        << " "
         << result.input
-        << '\n';
+        << "\n";
 
-    if (!result.reverseName.empty())
+    /*
+     * --------------------------------------------------------
+     * Reverse DNS
+     * --------------------------------------------------------
+     */
+
+    if (inputIsIP)
     {
         std::cout
-            << "Reverse : "
-            << result.reverseName
-            << '\n';
+            << "\n"
+            << " REVERSE DNS\n"
+            << "------------------------------------------------------------\n";
+
+        if (!result.reverseName.empty())
+        {
+            std::cout
+                << " Hostname     : "
+                << result.reverseName
+                << "\n"
+                << " Status       : PTR record found\n";
+        }
+        else
+        {
+            std::cout
+                << " Hostname     : Not available\n"
+                << " Status       : No PTR record\n";
+        }
     }
+
+    /*
+     * --------------------------------------------------------
+     * Canonical Name
+     * --------------------------------------------------------
+     */
 
     if (!result.canonicalName.empty())
     {
         std::cout
-            << "Canonical : "
+            << "\n"
+            << " CANONICAL NAME\n"
+            << "------------------------------------------------------------\n"
+            << " "
             << result.canonicalName
-            << '\n';
+            << "\n";
     }
+
+    /*
+     * --------------------------------------------------------
+     * Resolved Addresses
+     * --------------------------------------------------------
+     */
 
     if (!result.addresses.empty())
     {
         std::cout
-            << "\nAddresses\n"
+            << "\n"
+            << " RESOLVED ADDRESSES\n"
             << "------------------------------------------------------------\n";
 
-        for (const auto& address :
-             result.addresses)
+        for (const auto& address : result.addresses)
         {
             std::cout
-                << "  "
+                << "  • "
                 << address
-                << '\n';
+                << "\n";
         }
     }
 
-    if (!result.success)
+    /*
+     * --------------------------------------------------------
+     * Result
+     * --------------------------------------------------------
+     */
+
+    std::cout
+        << "\n"
+        << " RESULT\n"
+        << "------------------------------------------------------------\n";
+
+    if (inputIsIP)
+    {
+        if (!result.reverseName.empty())
+        {
+            std::cout
+                << " Status       : RESOLVED\n"
+                << " Hostname     : "
+                << result.reverseName
+                << "\n";
+        }
+        else
+        {
+            std::cout
+                << " Status       : NO PTR RECORD\n"
+                << " Note         : The target IP has no reverse DNS hostname.\n";
+        }
+    }
+    else
+    {
+        if (!result.addresses.empty())
+        {
+            std::cout
+                << " Status       : RESOLVED\n";
+        }
+        else
+        {
+            std::cout
+                << " Status       : FAILED\n"
+                << " Note         : No DNS addresses were returned.\n";
+        }
+    }
+
+    /*
+     * --------------------------------------------------------
+     * Final status
+     * --------------------------------------------------------
+     */
+
+    std::cout << "\n";
+
+    if (result.success)
     {
         std::cout
-            << "\n[!] DNS resolution failed.\n";
+            << "[+] DNS resolution completed successfully.\n";
+    }
+    else if (
+        inputIsIP &&
+        result.reverseName.empty()
+    )
+    {
+        std::cout
+            << "[*] Reverse DNS lookup completed.\n"
+            << "[*] No PTR record was found for this IP address.\n";
     }
     else
     {
         std::cout
-            << "\n[+] DNS resolution completed.\n";
+            << "[!] DNS resolution failed.\n"
+            << "[*] Verify the hostname/IP and DNS availability.\n";
     }
-
-    std::cout
-        << "============================================================\n";
 }
 
 void CommandHandler::handleOSFingerprint(
@@ -2288,60 +2376,126 @@ void CommandHandler::handleOSFingerprint(
     if (command.arguments.size() != 1)
     {
         std::cout
-            << "\nUsage: os|:fingerprint <IP>\n";
+            << "\n"
+            << "Usage: os|:fingerprint <IP>\n"
+            << "\n"
+            << "Example:\n"
+            << "  os|:fingerprint 192.168.1.10\n";
 
         return;
     }
 
+
     const std::string& target =
         command.arguments[0];
 
+
     std::cout
-        << "\n[*] Fingerprinting "
+        << "\n"
+        << "[*] Fingerprinting "
         << target
         << "...\n";
 
+
     OSFingerprinter fingerprinter;
 
-    OSFingerprint result =
-        fingerprinter.fingerprint(target);
+    const OSFingerprint result =
+        fingerprinter.fingerprint(
+            target
+        );
+
+
+    /*
+     * --------------------------------------------------------
+     * ASCII-safe presentation
+     * --------------------------------------------------------
+     *
+     * Do not use Unicode box-drawing characters here.
+     *
+     * SlipNet is intended to run on:
+     *
+     *   - Windows CMD
+     *   - PowerShell
+     *   - Windows Terminal
+     *   - MSYS2 UCRT64
+     *   - Linux terminals
+     *
+     * ASCII guarantees consistent output across platforms.
+     */
 
     std::cout
-        << "\n============================================================\n"
-        << "                    OS FINGERPRINT\n"
-        << "============================================================\n"
-        << "Target      : "
-        << target
-        << '\n';
+        << "\n"
+        << "+------------------------------------------------------------+\n"
+        << "| SLIPNET :: OS FINGERPRINT                                  |\n"
+        << "+------------------------------------------------------------+\n"
+        << "\n"
+        << " TARGET\n"
+        << " ------------------------------------------------------------\n"
+        << " IP Address       : "
+        << result.target
+        << "\n";
+
+
+    /*
+     * --------------------------------------------------------
+     * Fingerprint result
+     * --------------------------------------------------------
+     */
 
     if (!result.detected)
     {
         std::cout
-            << "OS          : Unknown\n"
-            << "Confidence  : LOW\n";
+            << "\n"
+            << " FINGERPRINT\n"
+            << " ------------------------------------------------------------\n"
+            << " Operating System : Unknown\n"
+            << " Observed TTL     : Unavailable\n"
+            << " Confidence       : LOW\n"
+            << " Method            : TTL heuristic\n"
+            << "\n"
+            << "[!] Unable to obtain a usable OS fingerprint.\n"
+            << "[*] The target may be unreachable or filtering ICMP.\n"
+            << "+------------------------------------------------------------+\n";
 
-        std::cout
-            << "[!] Unable to obtain a usable fingerprint.\n";
+        return;
     }
-    else
-    {
-        std::cout
-            << "OS          : "
-            << result.operatingSystem
-            << '\n'
-            << "TTL         : "
-            << result.ttl
-            << '\n'
-            << "Confidence  : "
-            << result.confidence
-            << '\n';
 
-        std::cout
-            << "[+] Heuristic fingerprint completed.\n";
-    }
 
     std::cout
-        << "============================================================\n";
+        << "\n"
+        << " FINGERPRINT\n"
+        << " ------------------------------------------------------------\n"
+        << " Operating System : "
+        << result.operatingSystem
+        << "\n"
+        << " Observed TTL     : "
+        << result.ttl
+        << "\n"
+        << " Confidence       : "
+        << result.confidence
+        << "\n"
+        << " Method            : TTL heuristic\n";
+
+
+    /*
+     * --------------------------------------------------------
+     * Interpretation
+     * --------------------------------------------------------
+     */
+
+    std::cout
+        << "\n"
+        << " ANALYSIS\n"
+        << " ------------------------------------------------------------\n"
+        << " TTL-based classification is heuristic.\n"
+        << " It does not guarantee the target operating system.\n";
+
+
+    std::cout
+        << "\n"
+        << "[+] Heuristic OS fingerprint completed successfully.\n"
+        << "[*] Result is based on observed network characteristics.\n"
+        << "+------------------------------------------------------------+\n";
 }
 
 void CommandHandler::handleBannerGrab(
@@ -2390,37 +2544,55 @@ void CommandHandler::handleBannerGrab(
         );
 
     std::cout
-        << "\n============================================================\n"
-        << "                      BANNER GRAB\n"
-        << "============================================================\n"
-        << "Target      : "
+        << "\n"
+        << "╭──────────────────────────────────────────────────────────────╮\n"
+        << "│ SLIPNET :: SERVICE BANNER                                   │\n"
+        << "╰──────────────────────────────────────────────────────────────╯\n"
+        << "\n"
+
+        << " TARGET\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " IP Address     "
         << result.host
-        << '\n'
-        << "Port        : "
+        << "\n"
+        << " Port           "
         << result.port
-        << '\n'
-        << "Protocol    : "
+        << "\n"
+        << " Protocol       "
         << result.protocol
-        << '\n'
-        << "Connected   : "
-        << (result.connected ? "YES" : "NO")
-        << '\n';
+        << "\n"
+        << " Connection     "
+        << (result.connected ? "ESTABLISHED" : "FAILED")
+        << "\n";
 
     if (!result.banner.empty())
     {
         std::cout
-            << "\nBanner\n"
-            << "------------------------------------------------------------\n"
+            << "\n"
+            << " BANNER\n"
+            << " ────────────────────────────────────────────────────────────\n"
+            << " "
             << result.banner
-            << '\n';
+            << "\n\n"
+            << "[+] Service banner retrieved successfully.\n";
+    }
+    else if (result.connected)
+    {
+        std::cout
+            << "\n"
+            << "[*] TCP connection established.\n"
+            << "[!] The service did not return an application banner.\n";
     }
     else
     {
         std::cout
-            << "\n[!] No application banner returned.\n";
+            << "\n"
+            << "[!] Unable to establish a TCP connection.\n"
+            << "[*] Verify that the host is reachable and the port is open.\n";
     }
 
     std::cout
+        << "\n"
         << "============================================================\n";
 }
 
@@ -2431,42 +2603,91 @@ void CommandHandler::handleSubnetCalc(
     if (command.arguments.size() != 1)
     {
         std::cout
-            << "\nUsage: subnet|:calc <CIDR>\n";
+            << "\nUsage: subnet|:calc <CIDR>\n"
+            << "Example: subnet|:calc 192.168.1.0/24\n";
 
         return;
     }
 
+    const std::string& cidr =
+        command.arguments[0];
+
+    std::cout
+        << "\n[*] Calculating subnet information for "
+        << cidr
+        << "...\n";
+
     SubnetCalculator calculator;
 
     SubnetInfo result =
-        calculator.calculate(
-            command.arguments[0]
-        );
+        calculator.calculate(cidr);
 
     if (!result.valid)
     {
         std::cout
-            << "\n[!] Invalid IPv4 CIDR.\n"
-            << "    Example: subnet|:calc 192.168.1.0/24\n";
+            << "\n╭──────────────────────────────────────────────────────────────╮\n"
+            << "│ SLIPNET :: SUBNET CALCULATOR                                │\n"
+            << "╰──────────────────────────────────────────────────────────────╯\n"
+            << "\n"
+            << "[!] Invalid IPv4 CIDR notation.\n"
+            << "[*] Example: subnet|:calc 192.168.1.0/24\n";
 
         return;
     }
 
     std::cout
-        << "\n============================================================\n"
-        << "                     SUBNET CALCULATOR\n"
-        << "============================================================\n"
-        << "CIDR          : " << result.input << '\n'
-        << "Network       : " << result.network << '\n'
-        << "Broadcast     : " << result.broadcast << '\n'
-        << "Netmask       : " << result.netmask << '\n'
-        << "Wildcard      : " << result.wildcard << '\n'
-        << "Prefix        : /" << result.prefix << '\n'
-        << "First host    : " << result.firstHost << '\n'
-        << "Last host     : " << result.lastHost << '\n'
-        << "Total         : " << result.totalAddresses << '\n'
-        << "Usable hosts  : " << result.usableHosts << '\n'
-        << "============================================================\n";
+        << "\n╭──────────────────────────────────────────────────────────────╮\n"
+        << "│ SLIPNET :: SUBNET CALCULATOR                                │\n"
+        << "╰──────────────────────────────────────────────────────────────╯\n"
+        << "\n";
+
+    std::cout
+        << " NETWORK\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " CIDR          "
+        << result.input
+        << "\n"
+        << " Network       "
+        << result.network
+        << "\n"
+        << " Netmask       "
+        << result.netmask
+        << "\n"
+        << " Wildcard      "
+        << result.wildcard
+        << "\n"
+        << " Prefix        /"
+        << result.prefix
+        << "\n\n";
+
+    std::cout
+        << " ADDRESS SPACE\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Total         "
+        << result.totalAddresses
+        << "\n"
+        << " Usable Hosts  "
+        << result.usableHosts
+        << "\n"
+        << " First Host    "
+        << result.firstHost
+        << "\n"
+        << " Last Host     "
+        << result.lastHost
+        << "\n"
+        << " Broadcast     "
+        << result.broadcast
+        << "\n\n";
+
+    std::cout
+        << " ADDRESS CLASSIFICATION\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Type          "
+        << result.addressType
+        << "\n\n";
+
+    std::cout
+        << "[+] Subnet calculation completed successfully.\n";
 }
 
 void CommandHandler::handleVulnScan(
@@ -2558,100 +2779,158 @@ void CommandHandler::handleVulnScan(
                 ++low;
                 break;
 
-            default:
+            case VulnerabilitySeverity::INFO:
                 ++info;
                 break;
         }
-
-        std::string severity;
-
-        switch (finding.severity)
-        {
-            case VulnerabilitySeverity::CRITICAL:
-                severity = "CRITICAL";
-                break;
-
-            case VulnerabilitySeverity::HIGH:
-                severity = "HIGH";
-                break;
-
-            case VulnerabilitySeverity::MEDIUM:
-                severity = "MEDIUM";
-                break;
-
-            case VulnerabilitySeverity::LOW:
-                severity = "LOW";
-                break;
-
-            default:
-                severity = "INFO";
-                break;
-        }
-
-        std::cout
-            << "\n[" << severity << "] "
-            << finding.id
-            << "\n"
-            << "Target      : "
-            << finding.host
-            << ":"
-            << finding.port
-            << "\n"
-            << "Title       : "
-            << finding.title
-            << "\n"
-            << "Description : "
-            << finding.description
-            << "\n"
-            << "Evidence    : "
-            << finding.evidence
-            << "\n"
-            << "Confidence  : "
-            << finding.confidence
-            << "%\n"
-            << "Remediation : "
-            << finding.remediation
-            << "\n";
     }
 
     std::cout
-        << "\n------------------------------------------------------------\n"
-        << "Services analyzed : "
+        << "\n"
+        << "╭──────────────────────────────────────────────────────────────╮\n"
+        << "│ SLIPNET :: VULNERABILITY ASSESSMENT                         │\n"
+        << "╰──────────────────────────────────────────────────────────────╯\n\n"
+
+        << " SCOPE\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Services Analyzed     "
         << targets.size()
         << "\n"
-        << "Findings          : "
+        << " Findings              "
         << findings.size()
-        << "\n"
-        << "Critical          : "
+        << "\n\n"
+
+        << " RISK SUMMARY\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Critical              "
         << critical
         << "\n"
-        << "High              : "
+        << " High                  "
         << high
         << "\n"
-        << "Medium            : "
+        << " Medium                "
         << medium
         << "\n"
-        << "Low               : "
+        << " Low                   "
         << low
         << "\n"
-        << "Informational     : "
+        << " Informational         "
         << info
-        << "\n";
+        << "\n\n";
 
     if (findings.empty())
     {
         std::cout
-            << "\n[+] No built-in vulnerability findings.\n";
+            << "[+] No known exposure heuristics detected.\n"
+            << "[*] This does not prove that the target is vulnerability-free.\n";
+    }
+    else
+    {
+        for (const auto& finding : findings)
+        {
+            std::string severity;
+
+            switch (finding.severity)
+            {
+                case VulnerabilitySeverity::CRITICAL:
+                    severity = "CRITICAL";
+                    break;
+
+                case VulnerabilitySeverity::HIGH:
+                    severity = "HIGH";
+                    break;
+
+                case VulnerabilitySeverity::MEDIUM:
+                    severity = "MEDIUM";
+                    break;
+
+                case VulnerabilitySeverity::LOW:
+                    severity = "LOW";
+                    break;
+
+                default:
+                    severity = "INFO";
+                    break;
+            }
+
+            std::cout
+                << " ┌──────────────────────────────────────────────────────────\n"
+                << " │ [" << severity << "] "
+                << finding.id
+                << "\n"
+                << " │ Target       : "
+                << finding.host
+                << ":"
+                << finding.port
+                << "\n"
+                << " │ Service      : "
+                << finding.service;
+
+            if (!finding.version.empty())
+            {
+                std::cout
+                    << " "
+                    << finding.version;
+            }
+
+            std::cout
+                << "\n"
+                << " │ Title        : "
+                << finding.title
+                << "\n"
+                << " │ Confidence   : "
+                << finding.confidence
+                << "%\n"
+                << " │ Evidence     : "
+                << finding.evidence
+                << "\n"
+                << " │ Description  : "
+                << finding.description
+                << "\n"
+                << " │ Remediation  : "
+                << finding.remediation
+                << "\n"
+                << " └──────────────────────────────────────────────────────────\n";
+        }
+    }
+
+    std::cout
+        << "\n"
+        << " ASSESSMENT STATUS\n"
+        << " ────────────────────────────────────────────────────────────\n";
+
+    if (critical > 0)
+    {
+        std::cout
+            << " Risk Level     CRITICAL\n";
+    }
+    else if (high > 0)
+    {
+        std::cout
+            << " Risk Level     HIGH\n";
+    }
+    else if (medium > 0)
+    {
+        std::cout
+            << " Risk Level     MEDIUM\n";
+    }
+    else if (low > 0)
+    {
+        std::cout
+            << " Risk Level     LOW\n";
     }
     else
     {
         std::cout
-            << "\n[!] Review the findings above.\n"
-            << "[*] Findings represent security indicators,\n"
-            << "    not proof of compromise.\n";
+            << " Risk Level     INFORMATIONAL\n";
     }
 
     std::cout
+        << "\n"
+        << "[+] Vulnerability assessment completed.\n"
+        << "[*] Findings are heuristic security indicators, "
+        "not confirmed CVE diagnoses.\n"
+        << "\n"
         << "============================================================\n";
 }
 
@@ -2662,8 +2941,17 @@ void CommandHandler::handleCredCheck(
 {
     std::cout
         << "\n============================================================\n"
-        << "                  SLIPNET CREDENTIAL AUDIT\n"
+        << "                 SLIPNET CREDENTIAL ENGINE\n"
         << "============================================================\n";
+
+    if (command.arguments.size() > 1)
+    {
+        std::cout
+            << "[!] Usage: cred|:check [IP]\n"
+            << "============================================================\n";
+
+        return;
+    }
 
     const auto& services =
         context.network.getServices();
@@ -2671,8 +2959,13 @@ void CommandHandler::handleCredCheck(
     if (services.empty())
     {
         std::cout
-            << "[!] No detected services available.\n"
-            << "[*] Run svc|:detect <IP> first.\n"
+            << "[!] No service intelligence available.\n"
+            << "[*] Run:\n"
+            << "    ip|:seek\n"
+            << "    port|:scan <IP>\n"
+            << "    svc|:detect <IP>\n"
+            << "    cred|:check\n"
+            << "\n"
             << "============================================================\n";
 
         return;
@@ -2686,30 +2979,96 @@ void CommandHandler::handleCredCheck(
     }
     else
     {
+        const std::string& target =
+            command.arguments[0];
+
         for (const auto& service : services)
         {
-            if (
-                service.ip ==
-                command.arguments[0]
-            )
+            if (service.ip == target)
             {
                 targets.push_back(service);
             }
         }
+
+        if (targets.empty())
+        {
+            std::cout
+                << "[!] No detected services for "
+                << target
+                << ".\n"
+                << "============================================================\n";
+
+            return;
+        }
     }
 
-    if (targets.empty())
-    {
-        std::cout
-            << "[!] No services found for requested target.\n";
-
-        return;
-    }
+    std::cout
+        << "\n[*] Analyzing credential exposure...\n";
 
     CredentialChecker checker;
 
     const auto findings =
-        checker.analyze(targets);
+        checker.check(targets);
+
+    int critical = 0;
+    int high = 0;
+    int medium = 0;
+    int low = 0;
+    int info = 0;
+
+    for (const auto& finding : findings)
+    {
+        switch (finding.risk)
+        {
+            case CredentialRisk::CRITICAL:
+                ++critical;
+                break;
+
+            case CredentialRisk::HIGH:
+                ++high;
+                break;
+
+            case CredentialRisk::MEDIUM:
+                ++medium;
+                break;
+
+            case CredentialRisk::LOW:
+                ++low;
+                break;
+
+            default:
+                ++info;
+                break;
+        }
+    }
+
+    std::cout
+        << "\n"
+        << " SCOPE\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Services Analyzed     "
+        << targets.size()
+        << "\n"
+        << " Findings              "
+        << findings.size()
+        << "\n\n"
+        << " CREDENTIAL RISK\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Critical              "
+        << critical
+        << "\n"
+        << " High                  "
+        << high
+        << "\n"
+        << " Medium                "
+        << medium
+        << "\n"
+        << " Low                   "
+        << low
+        << "\n"
+        << " Informational         "
+        << info
+        << "\n";
 
     for (const auto& finding : findings)
     {
@@ -2747,6 +3106,9 @@ void CommandHandler::handleCredCheck(
             << ":"
             << finding.port
             << "\n"
+            << "Service     : "
+            << finding.service
+            << "\n"
             << "Title       : "
             << finding.title
             << "\n"
@@ -2756,35 +3118,45 @@ void CommandHandler::handleCredCheck(
             << "Evidence    : "
             << finding.evidence
             << "\n"
+            << "Confidence  : "
+            << finding.confidence
+            << "%\n"
             << "Remediation : "
             << finding.remediation
             << "\n";
     }
 
-    std::cout
-        << "\n------------------------------------------------------------\n"
-        << "Services reviewed : "
-        << targets.size()
-        << "\n"
-        << "Credential risks  : "
-        << findings.size()
-        << "\n";
-
     if (findings.empty())
     {
         std::cout
-            << "[+] No credential exposure indicators detected.\n";
-    }
-    else
-    {
-        std::cout
-            << "[!] Credential hardening should be reviewed.\n";
+            << "\n[+] No credential exposure heuristics detected.\n"
+            << "[*] No credentials were collected, tested or "
+               "brute-forced.\n";
     }
 
+    std::string overallRisk =
+        "INFORMATIONAL";
+
+    if (critical > 0)
+        overallRisk = "CRITICAL";
+    else if (high > 0)
+        overallRisk = "HIGH";
+    else if (medium > 0)
+        overallRisk = "MEDIUM";
+    else if (low > 0)
+        overallRisk = "LOW";
+
     std::cout
-        << "[*] No password guessing or brute-force attempts "
-        << "are performed.\n"
-        << "============================================================\n";
+        << "\n"
+        << " ASSESSMENT STATUS\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Risk Level     "
+        << overallRisk
+        << "\n\n"
+        << "[+] Credential assessment completed.\n"
+        << "[*] Findings indicate potential credential exposure risks; "
+           "they are not proof of compromised credentials.\n"
+        << "\n============================================================\n";
 }
 
 
@@ -2792,120 +3164,216 @@ void CommandHandler::handleSSLAudit(
     const ParsedCommand& command
 )
 {
-    if (command.arguments.size() != 1)
+    std::cout
+        << "\n"
+        << "╭──────────────────────────────────────────────────────────────╮\n"
+        << "│ SLIPNET :: TLS / SSL AUDIT                                 │\n"
+        << "╰──────────────────────────────────────────────────────────────╯\n";
+
+    if (
+        command.arguments.empty() ||
+        command.arguments.size() > 2
+    )
     {
         std::cout
-            << "\nUsage: ssl|:audit <HOST[:PORT]>\n"
-            << "Examples:\n"
-            << "  ssl|:audit example.com\n"
-            << "  ssl|:audit example.com:443\n";
+            << "\nUsage:\n"
+            << "  ssl|:audit <IP|HOSTNAME>\n"
+            << "  ssl|:audit <IP|HOSTNAME> <PORT>\n";
 
         return;
     }
 
-    SSLAuditor auditor;
+    const std::string host =
+        command.arguments[0];
+
+    int port = 443;
+
+    if (command.arguments.size() == 2)
+    {
+        try
+        {
+            port =
+                std::stoi(
+                    command.arguments[1]
+                );
+        }
+        catch (...)
+        {
+            std::cout
+                << "\n[!] Invalid port.\n";
+
+            return;
+        }
+
+        if (port < 1 || port > 65535)
+        {
+            std::cout
+                << "\n[!] Port must be between 1 and 65535.\n";
+
+            return;
+        }
+    }
 
     std::cout
-        << "\n[*] Starting TLS audit for "
-        << command.arguments[0]
-        << "...\n";
+        << "\n"
+        << "[*] Auditing TLS service...\n";
 
-    const auto result =
+    SSLAuditor auditor;
+
+    const SSLAuditResult result =
         auditor.audit(
-            command.arguments[0]
+            host,
+            port
         );
 
     std::cout
-        << "\n============================================================\n"
-        << "                     TLS AUDIT RESULT\n"
-        << "============================================================\n";
+        << "\n TARGET\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Host           " << result.host << '\n'
+        << " Port           " << result.port << '\n'
+        << " TCP Connection "
+        << (result.connected ? "ESTABLISHED" : "FAILED")
+        << '\n';
 
-    if (!result.success)
+    if (!result.connected)
     {
         std::cout
-            << "[!] TLS audit failed.\n"
-            << "[!] "
-            << result.error
-            << "\n"
+            << "\n[!] Unable to establish a TCP connection.\n"
+            << "[*] Verify that the host is reachable and the "
+               "specified port is open.\n"
+            << "\n[+] TLS audit completed.\n"
             << "============================================================\n";
 
         return;
     }
 
-    std::cout
-        << "Target          : "
-        << result.host
-        << ":"
-        << result.port
-        << "\n"
-        << "Protocol        : "
-        << result.protocol
-        << "\n"
-        << "Cipher          : "
-        << result.cipher
-        << "\n"
-        << "Certificate     : "
-        << (result.certificateValid
-            ? "VALID"
-            : "INVALID")
-        << "\n"
-        << "Hostname match  : "
-        << (result.hostnameMatch
-            ? "YES"
-            : "NO")
-        << "\n"
-        << "Subject         : "
-        << result.subject
-        << "\n"
-        << "Issuer          : "
-        << result.issuer
-        << "\n"
-        << "Valid from      : "
-        << result.validFrom
-        << "\n"
-        << "Valid until     : "
-        << result.validUntil
-        << "\n";
-
-    if (result.daysRemaining >= 0)
+    if (!result.tlsEstablished)
     {
         std::cout
-            << "Days remaining  : "
-            << result.daysRemaining
-            << "\n";
+            << "\n[!] TCP connection succeeded, but TLS "
+               "negotiation failed.\n";
+
+        for (const auto& finding : result.findings)
+        {
+            std::cout
+                << "\n[" << finding.id << "] "
+                << finding.title << '\n'
+                << "  " << finding.description << '\n'
+                << "  Evidence    : "
+                << finding.evidence << '\n'
+                << "  Remediation : "
+                << finding.remediation << '\n';
+        }
+
+        std::cout
+            << "\n============================================================\n";
+
+        return;
     }
 
     std::cout
-        << "\nFINDINGS\n"
-        << "------------------------------------------------------------\n";
+        << "\n TLS SESSION\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " TLS Version    " << result.tlsVersion << '\n'
+        << " Cipher         " << result.cipher << '\n';
+
+    std::cout
+        << "\n CERTIFICATE\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Subject        "
+        << (result.subject.empty()
+                ? "Unavailable"
+                : result.subject)
+        << '\n'
+        << " Issuer         "
+        << (result.issuer.empty()
+                ? "Unavailable"
+                : result.issuer)
+        << '\n'
+        << " Valid From     "
+        << (result.validFrom.empty()
+                ? "Unavailable"
+                : result.validFrom)
+        << '\n'
+        << " Valid Until    "
+        << (result.validUntil.empty()
+                ? "Unavailable"
+                : result.validUntil)
+        << '\n'
+        << " Certificate    "
+        << (result.certificateValid ? "VALID" : "INVALID")
+        << '\n'
+        << " Self-Signed    "
+        << (result.selfSigned ? "YES" : "NO")
+        << '\n';
+
+    int critical = 0;
+    int high = 0;
+    int medium = 0;
+    int low = 0;
+    int info = 0;
+
+    for (const auto& finding : result.findings)
+    {
+        switch (finding.severity)
+        {
+            case SSLSeverity::CRITICAL:
+                ++critical;
+                break;
+
+            case SSLSeverity::HIGH:
+                ++high;
+                break;
+
+            case SSLSeverity::MEDIUM:
+                ++medium;
+                break;
+
+            case SSLSeverity::LOW:
+                ++low;
+                break;
+
+            default:
+                ++info;
+                break;
+        }
+    }
+
+    std::cout
+        << "\n FINDINGS\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Critical       " << critical << '\n'
+        << " High           " << high << '\n'
+        << " Medium         " << medium << '\n'
+        << " Low            " << low << '\n'
+        << " Informational  " << info << '\n';
 
     if (result.findings.empty())
     {
         std::cout
-            << "[+] No TLS findings.\n";
+            << "\n[+] No TLS security indicators detected.\n";
     }
     else
     {
-        for (const auto& finding :
-             result.findings)
+        for (const auto& finding : result.findings)
         {
             std::string severity;
 
             switch (finding.severity)
             {
-                case TLSSeverity::CRITICAL:
+                case SSLSeverity::CRITICAL:
                     severity = "CRITICAL";
                     break;
 
-                case TLSSeverity::HIGH:
+                case SSLSeverity::HIGH:
                     severity = "HIGH";
                     break;
 
-                case TLSSeverity::MEDIUM:
+                case SSLSeverity::MEDIUM:
                     severity = "MEDIUM";
                     break;
 
-                case TLSSeverity::LOW:
+                case SSLSeverity::LOW:
                     severity = "LOW";
                     break;
 
@@ -2915,30 +3383,57 @@ void CommandHandler::handleSSLAudit(
             }
 
             std::cout
-                << "[" << severity << "] "
-                << finding.id
-                << "\n"
-                << "    "
-                << finding.title
-                << "\n"
-                << "    "
-                << finding.description
-                << "\n"
-                << "    Fix: "
-                << finding.remediation
-                << "\n";
+                << "\n[" << severity << "] "
+                << finding.id << '\n'
+                << "Title        : "
+                << finding.title << '\n'
+                << "Description  : "
+                << finding.description << '\n'
+                << "Evidence     : "
+                << finding.evidence << '\n'
+                << "Confidence   : "
+                << finding.confidence << "%\n"
+                << "Remediation  : "
+                << finding.remediation << '\n';
         }
     }
 
+    std::string riskLevel = "INFORMATIONAL";
+
+    if (critical > 0)
+    {
+        riskLevel = "CRITICAL";
+    }
+    else if (high > 0)
+    {
+        riskLevel = "HIGH";
+    }
+    else if (medium > 0)
+    {
+        riskLevel = "MEDIUM";
+    }
+    else if (low > 0)
+    {
+        riskLevel = "LOW";
+    }
+
     std::cout
-        << "============================================================\n";
+        << "\n ASSESSMENT STATUS\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Risk Level     " << riskLevel << '\n'
+        << "\n[+] TLS audit completed.\n"
+        << "[*] Findings are security indicators and should be "
+           "validated against the service configuration.\n"
+        << "\n============================================================\n";
 }
 
 void CommandHandler::handleFirewallProbe(
     const ParsedCommand& command
 )
 {
-    if (command.arguments.size() != 1)
+    if (
+        command.arguments.size() != 1
+    )
     {
         std::cout
             << "\nUsage: firewall|:probe <IP>\n"
@@ -2951,111 +3446,184 @@ void CommandHandler::handleFirewallProbe(
     const std::string& ip =
         command.arguments[0];
 
-    const auto& ports =
-        context.network.getPorts(ip);
+    /*
+     * Common TCP ports selected for defensive
+     * exposure analysis.
+     *
+     * These are intentionally limited rather than
+     * performing a large arbitrary port scan.
+     */
+    const std::vector<int> probePorts =
+    {
+        21,
+        22,
+        23,
+        25,
+        53,
+        80,
+        110,
+        139,
+        143,
+        443,
+        445,
+        3306,
+        3389,
+        5432,
+        6379,
+        8080
+    };
 
     std::cout
-        << "\n============================================================\n"
-        << "                  SLIPNET FIREWALL ANALYSIS\n"
-        << "============================================================\n"
-        << "Target : "
+        << "\n╭──────────────────────────────────────────────────────────────╮\n"
+        << "│ SLIPNET :: FIREWALL PROBE                                  │\n"
+        << "╰──────────────────────────────────────────────────────────────╯\n"
+        << "\n TARGET\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Host              "
         << ip
-        << "\n";
-
-    if (ports.empty())
-    {
-        std::cout
-            << "\n[!] No port observations available.\n"
-            << "[*] Run:\n"
-            << "    port|:scan "
-            << ip
-            << "\n"
-            << "============================================================\n";
-
-        return;
-    }
+        << "\n"
+        << " Ports Tested      "
+        << probePorts.size()
+        << "\n"
+        << " Timeout           1500 ms\n"
+        << "\n[*] Probing TCP response behavior...\n";
 
     FirewallProbe probe;
 
     const auto report =
         probe.analyze(
             ip,
-            ports
+            probePorts
         );
 
     std::cout
-        << "\nSUMMARY\n"
-        << "------------------------------------------------------------\n"
-        << "Observed ports : "
-        << report.observed
-        << "\n"
-        << "Open           : "
-        << report.open
-        << "\n"
-        << "Closed         : "
-        << report.closed
-        << "\n"
-        << "Unknown        : "
-        << report.unknown
-        << "\n";
+        << "\n RESULTS\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Port       State          Latency\n"
+        << " ────────────────────────────────────────────────────────────\n";
 
-    std::cout
-        << "\nPORT OBSERVATIONS\n"
-        << "------------------------------------------------------------\n";
-
-    for (const auto& observation :
-         report.observations)
+    for (
+        const auto& observation :
+        report.observations
+    )
     {
         std::cout
-            << "Port "
-            << observation.port
-            << " : ";
+            << " "
+            << observation.port;
+
+        if (observation.port < 100)
+            std::cout << "        ";
+        else if (observation.port < 1000)
+            std::cout << "       ";
+        else
+            std::cout << "      ";
+
+        std::string state;
 
         switch (observation.state)
         {
             case FirewallState::OPEN:
-                std::cout << "OPEN";
+                state = "OPEN";
                 break;
 
             case FirewallState::CLOSED:
-                std::cout << "CLOSED";
+                state = "CLOSED";
                 break;
 
             case FirewallState::FILTERED:
-                std::cout << "FILTERED";
+                state = "FILTERED";
                 break;
 
             default:
-                std::cout << "UNKNOWN";
+                state = "UNKNOWN";
                 break;
         }
 
         std::cout
-            << "\n    "
-            << observation.evidence
-            << "\n";
+            << state;
+
+        if (state.length() < 9)
+            std::cout << "        ";
+        else
+            std::cout << "     ";
+
+        if (
+            observation.latencyMs >= 0
+        )
+        {
+            std::cout
+                << observation.latencyMs
+                << " ms";
+        }
+        else
+        {
+            std::cout
+                << "--";
+        }
+
+        std::cout << '\n';
     }
 
     std::cout
-        << "\nCONCLUSION\n"
-        << "------------------------------------------------------------\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << "\n ANALYSIS\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " Open              "
+        << report.open
+        << '\n'
+        << " Closed            "
+        << report.closed
+        << '\n'
+        << " Filtered          "
+        << report.filtered
+        << '\n'
+        << " Unknown           "
+        << report.unknown
+        << '\n';
+
+    std::cout
+        << "\n FIREWALL EVIDENCE\n"
+        << " ────────────────────────────────────────────────────────────\n";
+
+    if (
+        report.hasEvidenceOfFiltering
+    )
+    {
+        std::cout
+            << " [+] Filtering behavior observed on "
+            << report.filtered
+            << " port(s).\n"
+            << " [*] Silent TCP timeouts may indicate packet filtering\n"
+            << "     or traffic dropping.\n";
+    }
+    else
+    {
+        std::cout
+            << " [*] No direct filtering behavior observed.\n";
+    }
+
+    std::cout
+        << "\n CONCLUSION\n"
+        << " ────────────────────────────────────────────────────────────\n"
+        << " "
         << report.conclusion
-        << "\n";
+        << '\n';
 
     std::cout
-        << "\n[*] Important: a closed TCP port does not by itself\n"
-        << "    prove that a firewall is filtering traffic.\n";
+        << "\n [!] Important: firewall behavior cannot be determined\n"
+        << "     with certainty from TCP connection behavior alone.\n"
+        << "     Results are network observations, not proof of a\n"
+        << "     specific firewall product or configuration.\n";
 
     std::cout
-        << "============================================================\n";
+        << "\n[+] Firewall probe completed successfully.\n"
+        << "\n============================================================\n";
 }
 
 void CommandHandler::handleSystemInfo(
     const ParsedCommand& command
 )
 {
-    (void)command;
-
     SystemInfoProvider provider;
 
     const SystemInfo info =

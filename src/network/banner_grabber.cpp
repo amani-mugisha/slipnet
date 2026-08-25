@@ -1,16 +1,7 @@
 #include "network/banner_grabber.hpp"
+#include "platform/tcp.hpp"
 
-#include <arpa/inet.h>
-
-#include <chrono>
-#include <cstring>
-
-#include <netinet/in.h>
-
-#include <sys/select.h>
-#include <sys/socket.h>
-
-#include <unistd.h>
+#include <string>
 
 BannerResult BannerGrabber::grab(
     const std::string& host,
@@ -22,79 +13,12 @@ BannerResult BannerGrabber::grab(
     result.host = host;
     result.port = port;
 
-    int socketFD =
-        socket(
-            AF_INET,
-            SOCK_STREAM,
-            0
-        );
-
-    if (socketFD < 0)
-    {
-        return result;
-    }
-
-    sockaddr_in address{};
-
-    address.sin_family = AF_INET;
-
-    address.sin_port =
-        htons(
-            static_cast<std::uint16_t>(
-                port
-            )
-        );
-
-    if (
-        inet_pton(
-            AF_INET,
-            host.c_str(),
-            &address.sin_addr
-        ) != 1
-    )
-    {
-        close(socketFD);
-        return result;
-    }
-
-    timeval timeout{};
-
-    timeout.tv_sec = 2;
-    timeout.tv_usec = 0;
-
-    setsockopt(
-        socketFD,
-        SOL_SOCKET,
-        SO_RCVTIMEO,
-        &timeout,
-        sizeof(timeout)
-    );
-
-    setsockopt(
-        socketFD,
-        SOL_SOCKET,
-        SO_SNDTIMEO,
-        &timeout,
-        sizeof(timeout)
-    );
-
-    if (
-        connect(
-            socketFD,
-            reinterpret_cast<sockaddr*>(&address),
-            sizeof(address)
-        ) != 0
-    )
-    {
-        close(socketFD);
-        return result;
-    }
-
-    result.connected = true;
-
     /*
-     * Protocol-aware request for HTTP.
+     * --------------------------------------------------------
+     * Determine protocol
+     * --------------------------------------------------------
      */
+
     if (
         port == 80 ||
         port == 8080 ||
@@ -102,19 +26,6 @@ BannerResult BannerGrabber::grab(
         port == 8888
     )
     {
-        const char request[] =
-            "HEAD / HTTP/1.0\r\n"
-            "Host: localhost\r\n"
-            "Connection: close\r\n"
-            "\r\n";
-
-        send(
-            socketFD,
-            request,
-            sizeof(request) - 1,
-            0
-        );
-
         result.protocol = "HTTP";
     }
     else if (port == 21)
@@ -129,37 +40,116 @@ BannerResult BannerGrabber::grab(
     {
         result.protocol = "SMTP";
     }
+    else if (
+        port == 110 ||
+        port == 995
+    )
+    {
+        result.protocol = "POP3";
+    }
+    else if (
+        port == 143 ||
+        port == 993
+    )
+    {
+        result.protocol = "IMAP";
+    }
+    else if (
+        port == 53
+    )
+    {
+        result.protocol = "DNS";
+    }
+    else if (
+        port == 443 ||
+        port == 8443
+    )
+    {
+        result.protocol = "HTTPS";
+    }
     else
     {
         result.protocol = "TCP";
     }
 
-    char buffer[4096]{};
 
-    ssize_t received =
-        recv(
-            socketFD,
-            buffer,
-            sizeof(buffer) - 1,
-            0
+    /*
+     * --------------------------------------------------------
+     * Establish TCP connection
+     * --------------------------------------------------------
+     */
+
+    auto connection =
+        slipnet::platform::tcpConnect(
+            host,
+            port,
+            2000
         );
 
-    if (received > 0)
+    if (!connection.valid)
     {
-        buffer[received] = '\0';
-
-        result.banner =
-            clean(
-                std::string(
-                    buffer,
-                    static_cast<std::size_t>(
-                        received
-                    )
-                )
-            );
+        return result;
     }
 
-    close(socketFD);
+    result.connected = true;
+
+
+    /*
+     * --------------------------------------------------------
+     * Protocol-aware requests
+     * --------------------------------------------------------
+     *
+     * Some services send a banner immediately.
+     *
+     * HTTP does not normally do this, so send a lightweight
+     * HEAD request first.
+     */
+
+    if (
+        result.protocol == "HTTP"
+    )
+    {
+        const std::string request =
+            "HEAD / HTTP/1.0\r\n"
+            "Host: " + host + "\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+
+        slipnet::platform::tcpSend(
+            connection,
+            request
+        );
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * Receive banner
+     * --------------------------------------------------------
+     */
+
+    const std::string banner =
+        slipnet::platform::tcpReceive(
+            connection,
+            4096
+        );
+
+    if (!banner.empty())
+    {
+        result.banner =
+            clean(banner);
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * Close connection
+     * --------------------------------------------------------
+     */
+
+    slipnet::platform::tcpClose(
+        connection
+    );
 
     return result;
 }
@@ -171,19 +161,39 @@ std::string BannerGrabber::clean(
 {
     std::string result;
 
+    result.reserve(
+        value.size()
+    );
+
     for (char c : value)
     {
+        /*
+         * Remove carriage returns.
+         */
         if (c == '\r')
         {
             continue;
         }
 
+        /*
+         * Convert line breaks into readable separators.
+         */
         if (c == '\n')
         {
-            result += " | ";
+            if (
+                !result.empty() &&
+                result.back() != ' '
+            )
+            {
+                result += " | ";
+            }
+
             continue;
         }
 
+        /*
+         * Ignore control characters.
+         */
         if (
             static_cast<unsigned char>(c) < 32
         )
@@ -193,6 +203,9 @@ std::string BannerGrabber::clean(
 
         result += c;
 
+        /*
+         * Keep CLI output bounded.
+         */
         if (result.size() >= 512)
         {
             break;

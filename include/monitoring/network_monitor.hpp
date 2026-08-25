@@ -11,19 +11,17 @@ class NetworkMonitor
 {
 public:
 
-    /*
-     * Start continuous network monitoring.
-     *
-     * Monitoring continues until Ctrl+C.
-     */
+    // Start continuous network monitoring.
+    //  Monitoring continues until Ctrl+C.
+     
     bool monitor(
         const std::string& interfaceName,
         int intervalSeconds = 1
     ) const;
 
-    /*
-     * Automatically detect the active interface.
-     */
+    
+    // Automatically detect the active interface.
+     
     std::string detectActiveInterface() const;
 
 private:

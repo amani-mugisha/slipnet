@@ -1,520 +1,711 @@
 #include "security/ssl_auditor.hpp"
 
-#include <openssl/ssl.h>
+#include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
-#include <cstring>
+#include <chrono>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
 
 namespace
 {
-    std::string x509Name(
-        X509_NAME* name
-    )
+
+std::string certificateName(
+    X509* certificate,
+    bool issuer
+)
+{
+    if (!certificate)
     {
-        if (!name)
-        {
-            return {};
-        }
-
-        char buffer[512] = {};
-
-        X509_NAME_oneline(
-            name,
-            buffer,
-            sizeof(buffer)
-        );
-
-        return buffer;
+        return {};
     }
 
-    std::string asn1Time(
-        const ASN1_TIME* time
+    X509_NAME* name =
+        issuer
+            ? X509_get_issuer_name(certificate)
+            : X509_get_subject_name(certificate);
+
+    if (!name)
+    {
+        return {};
+    }
+
+    BIO* bio =
+        BIO_new(BIO_s_mem());
+
+    if (!bio)
+    {
+        return {};
+    }
+
+    if (
+        X509_NAME_print_ex(
+            bio,
+            name,
+            0,
+            XN_FLAG_RFC2253
+        ) < 0
     )
     {
-        if (!time)
-        {
-            return {};
-        }
+        BIO_free(bio);
+        return {};
+    }
 
-        BIO* bio =
-            BIO_new(
-                BIO_s_mem()
-            );
+    char* data = nullptr;
 
-        if (!bio)
-        {
-            return {};
-        }
+    long length =
+        BIO_get_mem_data(
+            bio,
+            &data
+        );
 
+    std::string result;
+
+    if (length > 0 && data)
+    {
+        result.assign(
+            data,
+            static_cast<std::size_t>(length)
+        );
+    }
+
+    BIO_free(bio);
+
+    return result;
+}
+
+
+std::string asn1TimeToString(
+    const ASN1_TIME* time
+)
+{
+    if (!time)
+    {
+        return {};
+    }
+
+    BIO* bio =
+        BIO_new(BIO_s_mem());
+
+    if (!bio)
+    {
+        return {};
+    }
+
+    if (
         ASN1_TIME_print(
             bio,
             time
-        );
-
-        char* data = nullptr;
-
-        const long length =
-            BIO_get_mem_data(
-                bio,
-                &data
-            );
-
-        std::string result;
-
-        if (data && length > 0)
-        {
-            result.assign(
-                data,
-                static_cast<std::size_t>(length)
-            );
-        }
-
-        BIO_free(bio);
-
-        return result;
-    }
-
-    int connectSocket(
-        const std::string& host,
-        int port
+        ) != 1
     )
     {
-        struct addrinfo hints {};
-        struct addrinfo* result = nullptr;
-
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-
-        const std::string portString =
-            std::to_string(port);
-
-        if (
-            getaddrinfo(
-                host.c_str(),
-                portString.c_str(),
-                &hints,
-                &result
-            ) != 0
-        )
-        {
-            return -1;
-        }
-
-        int socketFd = -1;
-
-        for (
-            auto* current = result;
-            current != nullptr;
-            current = current->ai_next
-        )
-        {
-            socketFd =
-                socket(
-                    current->ai_family,
-                    current->ai_socktype,
-                    current->ai_protocol
-                );
-
-            if (socketFd < 0)
-            {
-                continue;
-            }
-
-            if (
-                connect(
-                    socketFd,
-                    current->ai_addr,
-                    current->ai_addrlen
-                ) == 0
-            )
-            {
-                break;
-            }
-
-            close(socketFd);
-
-            socketFd = -1;
-        }
-
-        freeaddrinfo(result);
-
-        return socketFd;
+        BIO_free(bio);
+        return {};
     }
+
+    char* data = nullptr;
+
+    long length =
+        BIO_get_mem_data(
+            bio,
+            &data
+        );
+
+    std::string result;
+
+    if (length > 0 && data)
+    {
+        result.assign(
+            data,
+            static_cast<std::size_t>(length)
+        );
+    }
+
+    BIO_free(bio);
+
+    return result;
 }
 
-bool SSLAuditor::parseTarget(
-    const std::string& input,
-    std::string& host,
-    int& port
+
+bool certificateTimeExpired(
+    X509* certificate
 )
 {
-    if (input.empty())
+    if (!certificate)
+    {
+        return true;
+    }
+
+    const ASN1_TIME* notBefore =
+        X509_get0_notBefore(certificate);
+
+    const ASN1_TIME* notAfter =
+        X509_get0_notAfter(certificate);
+
+    if (!notBefore || !notAfter)
+    {
+        return true;
+    }
+
+    if (
+        X509_cmp_current_time(notBefore) > 0
+    )
+    {
+        return true;
+    }
+
+    if (
+        X509_cmp_current_time(notAfter) < 0
+    )
+    {
+        return true;
+    }
+
+    return false;
+}
+
+
+bool certificateIsExpired(
+    X509* certificate
+)
+{
+    if (!certificate)
+    {
+        return true;
+    }
+
+    const ASN1_TIME* notAfter =
+        X509_get0_notAfter(certificate);
+
+    if (!notAfter)
+    {
+        return true;
+    }
+
+    return X509_cmp_current_time(notAfter) < 0;
+}
+
+
+bool certificateIsSelfSigned(
+    X509* certificate
+)
+{
+    if (!certificate)
     {
         return false;
     }
 
-    host = input;
-    port = 443;
-
-    /*
-     * IPv6:
-     * [2001:db8::1]:443
-     */
-    if (input.front() == '[')
-    {
-        const auto close =
-            input.find(']');
-
-        if (close == std::string::npos)
-        {
-            return false;
-        }
-
-        host =
-            input.substr(
-                1,
-                close - 1
-            );
-
-        if (
-            close + 1 < input.size() &&
-            input[close + 1] == ':'
-        )
-        {
-            try
-            {
-                port =
-                    std::stoi(
-                        input.substr(close + 2)
-                    );
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-    }
-    else
-    {
-        const auto colon =
-            input.rfind(':');
-
-        /*
-         * Treat :PORT as a port only when
-         * there is exactly one colon.
-         */
-        if (
-            colon != std::string::npos &&
-            input.find(':') == colon
-        )
-        {
-            try
-            {
-                port =
-                    std::stoi(
-                        input.substr(colon + 1)
-                    );
-
-                host =
-                    input.substr(
-                        0,
-                        colon
-                    );
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-    }
-
-    return
-        !host.empty() &&
-        port >= 1 &&
-        port <= 65535;
+    return X509_NAME_cmp(
+        X509_get_subject_name(certificate),
+        X509_get_issuer_name(certificate)
+    ) == 0;
 }
 
-void SSLAuditor::addFindings(
-    SSLAuditResult& result
+} // namespace
+
+
+SSLFinding SSLAuditor::makeFinding(
+    SSLSeverity severity,
+    const std::string& id,
+    const std::string& title,
+    const std::string& description,
+    const std::string& evidence,
+    const std::string& remediation,
+    int confidence
 )
 {
-    if (!result.certificateValid)
-    {
-        result.findings.push_back(
-            {
-                TLSSeverity::HIGH,
-                "SLP-TLS-CERT-INVALID",
-                "Certificate validation failed",
-                "The presented certificate could not be "
-                "validated successfully.",
-                "Install a valid certificate chain and "
-                "correct the certificate configuration."
-            }
-        );
-    }
+    SSLFinding finding;
 
-    if (!result.hostnameMatch)
-    {
-        result.findings.push_back(
-            {
-                TLSSeverity::HIGH,
-                "SLP-TLS-HOSTNAME-MISMATCH",
-                "Certificate hostname mismatch",
-                "The certificate identity does not match "
-                "the requested hostname.",
-                "Install a certificate containing the correct "
-                "DNS name in its SAN entries."
-            }
-        );
-    }
+    finding.severity = severity;
 
-    if (
-        result.daysRemaining >= 0 &&
-        result.daysRemaining <= 30
-    )
-    {
-        result.findings.push_back(
-            {
-                TLSSeverity::MEDIUM,
-                "SLP-TLS-EXPIRING",
-                "Certificate expires soon",
-                "The certificate has 30 or fewer days remaining.",
-                "Renew the certificate before expiration."
-            }
-        );
-    }
+    finding.id = id;
+    finding.title = title;
+    finding.description = description;
+    finding.evidence = evidence;
+    finding.remediation = remediation;
 
-    if (
-        result.protocol == "TLSv1" ||
-        result.protocol == "TLSv1.1"
-    )
-    {
-        result.findings.push_back(
-            {
-                TLSSeverity::HIGH,
-                "SLP-TLS-LEGACY-PROTOCOL",
-                "Legacy TLS protocol negotiated",
-                "The endpoint negotiated an obsolete TLS protocol.",
-                "Disable legacy TLS and require TLS 1.2 or newer."
-            }
+    finding.confidence =
+        std::max(
+            0,
+            std::min(
+                100,
+                confidence
+            )
         );
-    }
 
-    if (
-        result.protocol == "TLSv1.2" ||
-        result.protocol == "TLSv1.3"
-    )
-    {
-        /*
-         * Informational finding so the report clearly
-         * explains that modern TLS was observed.
-         */
-        result.findings.push_back(
-            {
-                TLSSeverity::INFO,
-                "SLP-TLS-MODERN",
-                "Modern TLS protocol observed",
-                "The endpoint negotiated a currently preferred "
-                "TLS protocol generation.",
-                "Continue monitoring TLS configuration."
-            }
-        );
-    }
+    return finding;
 }
 
-SSLAuditResult
-SSLAuditor::audit(
-    const std::string& target
+
+SSLAuditResult SSLAuditor::audit(
+    const std::string& host,
+    int port
 ) const
 {
     SSLAuditResult result;
 
-    if (
-        !parseTarget(
-            target,
-            result.host,
-            result.port
-        )
-    )
-    {
-        result.error =
-            "Invalid target. Expected HOST or HOST:PORT.";
+    result.host = host;
+    result.port = port;
 
-        return result;
-    }
+    /*
+     * OpenSSL initialization.
+     *
+     * Modern OpenSSL initializes the required
+     * algorithms automatically, but creating the
+     * SSL context remains necessary.
+     */
 
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_ssl_algorithms();
-
-    SSL_CTX* ctx =
+    SSL_CTX* context =
         SSL_CTX_new(
             TLS_client_method()
         );
 
-    if (!ctx)
+    if (!context)
     {
-        result.error =
-            "Unable to initialize OpenSSL.";
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::HIGH,
+                "SLP-SSL-CONTEXT",
+                "Unable to initialize TLS context",
+                "SlipNet could not initialize the OpenSSL "
+                "TLS client context.",
+                "SSL_CTX_new() failed.",
+                "Verify the OpenSSL installation and runtime "
+                "configuration.",
+                100
+            )
+        );
 
         return result;
     }
 
     /*
-     * We verify the peer certificate.
+     * We deliberately do not disable certificate
+     * verification globally.
+     *
+     * Verification is enabled so that SlipNet can
+     * identify certificate trust problems.
      */
+
     SSL_CTX_set_verify(
-        ctx,
+        context,
         SSL_VERIFY_PEER,
         nullptr
     );
 
-    SSL_CTX_set_default_verify_paths(ctx);
+    SSL_CTX_set_default_verify_paths(
+        context
+    );
 
-    int socketFd =
-        connectSocket(
-            result.host,
-            result.port
+    SSL* ssl = nullptr;
+    BIO* bio = nullptr;
+
+    const std::string target =
+        host + ":" + std::to_string(port);
+
+    bio =
+        BIO_new_connect(
+            target.c_str()
         );
 
-    if (socketFd < 0)
+    if (!bio)
     {
-        result.error =
-            "Unable to connect to TLS endpoint.";
+        SSL_CTX_free(context);
+        return result;
+    }
 
-        SSL_CTX_free(ctx);
+    /*
+     * TCP connection timeout.
+     *
+     * BIO_connect uses the underlying OpenSSL
+     * networking abstraction, keeping this code
+     * portable across Linux and Windows.
+     */
+
+    BIO_set_conn_hostname(
+        bio,
+        target.c_str()
+    );
+
+    if (
+        BIO_do_connect(bio) <= 0
+    )
+    {
+        BIO_free_all(bio);
+        SSL_CTX_free(context);
+
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::INFO,
+                "SLP-SSL-NOCONNECT",
+                "TLS endpoint unreachable",
+                "SlipNet could not establish the underlying "
+                "TCP connection to the TLS service.",
+                target,
+                "Verify that the host is reachable and that "
+                "the specified port provides a TLS service.",
+                100
+            )
+        );
 
         return result;
     }
 
-    SSL* ssl =
-        SSL_new(ctx);
+    result.connected = true;
+
+    ssl =
+        SSL_new(context);
 
     if (!ssl)
     {
-        result.error =
-            "Unable to create TLS session.";
-
-        close(socketFd);
-        SSL_CTX_free(ctx);
-
+        BIO_free_all(bio);
+        SSL_CTX_free(context);
         return result;
     }
 
-    SSL_set_fd(
+    /*
+     * Attach the connected BIO to OpenSSL.
+     */
+    SSL_set_bio(
         ssl,
-        socketFd
+        bio,
+        bio
     );
 
     /*
-     * SNI is essential for modern virtual-hosted TLS.
+     * Enable hostname verification when the target
+     * looks like a DNS hostname.
+     *
+     * For raw IP addresses, OpenSSL certificate
+     * verification is still performed, but hostname
+     * matching is only meaningful when the certificate
+     * contains an appropriate IP SAN.
      */
-    SSL_set_tlsext_host_name(
-        ssl,
-        result.host.c_str()
-    );
+
+    X509_VERIFY_PARAM* param =
+        SSL_get0_param(ssl);
+
+    if (param)
+    {
+        X509_VERIFY_PARAM_set1_host(
+            param,
+            host.c_str(),
+            0
+        );
+    }
 
     if (
         SSL_connect(ssl) != 1
     )
     {
-        result.error =
-            "TLS handshake failed.";
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::MEDIUM,
+                "SLP-TLS-HANDSHAKE",
+                "TLS handshake failed",
+                "The TCP service accepted a connection but "
+                "did not complete a TLS handshake.",
+                target,
+                "Verify that the service actually speaks TLS "
+                "and supports a compatible protocol version.",
+                100
+            )
+        );
 
         SSL_free(ssl);
-        close(socketFd);
-        SSL_CTX_free(ctx);
+        SSL_CTX_free(context);
 
         return result;
     }
 
-    result.success = true;
+    result.tlsEstablished = true;
 
     const char* version =
         SSL_get_version(ssl);
 
     if (version)
     {
-        result.protocol = version;
+        result.tlsVersion =
+            version;
     }
 
-    const char* cipher =
-        SSL_get_cipher_name(ssl);
+    const SSL_CIPHER* selectedCipher =
+        SSL_get_current_cipher(ssl);
 
-    if (cipher)
+    if (selectedCipher)
     {
-        result.cipher = cipher;
+        const char* cipherName =
+            SSL_CIPHER_get_name(
+                selectedCipher
+            );
+
+        if (cipherName)
+        {
+            result.cipher =
+                cipherName;
+        }
     }
 
     X509* certificate =
         SSL_get_peer_certificate(ssl);
 
-    if (certificate)
+    if (!certificate)
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::HIGH,
+                "SLP-TLS-NOCERT",
+                "TLS service did not provide a certificate",
+                "The TLS handshake completed without a peer "
+                "certificate.",
+                target,
+                "Configure the TLS service with a valid server "
+                "certificate.",
+                100
+            )
+        );
+    }
+    else
     {
         result.subject =
-            x509Name(
-                X509_get_subject_name(
-                    certificate
-                )
+            certificateName(
+                certificate,
+                false
             );
 
         result.issuer =
-            x509Name(
-                X509_get_issuer_name(
-                    certificate
-                )
+            certificateName(
+                certificate,
+                true
             );
 
         result.validFrom =
-            asn1Time(
+            asn1TimeToString(
                 X509_get0_notBefore(
                     certificate
                 )
             );
 
         result.validUntil =
-            asn1Time(
+            asn1TimeToString(
                 X509_get0_notAfter(
                     certificate
                 )
             );
 
-        /*
-         * OpenSSL performs certificate chain verification.
-         */
-        result.certificateValid =
-            SSL_get_verify_result(ssl) ==
-            X509_V_OK;
+        result.certificateExpired =
+            certificateIsExpired(
+                certificate
+            );
 
-        result.hostnameMatch =
-            X509_check_host(
-                certificate,
-                result.host.c_str(),
-                result.host.size(),
-                0,
-                nullptr
-            ) == 1;
+        result.certificateValid =
+            !certificateTimeExpired(
+                certificate
+            );
+
+        result.selfSigned =
+            certificateIsSelfSigned(
+                certificate
+            );
+
+        if (result.certificateExpired)
+        {
+            result.findings.push_back(
+                makeFinding(
+                    SSLSeverity::HIGH,
+                    "SLP-SSL-EXPIRED",
+                    "Expired TLS certificate",
+                    "The server certificate is no longer valid.",
+                    "Certificate expiry: " +
+                        result.validUntil,
+                    "Replace the certificate with a currently "
+                    "valid certificate.",
+                    100
+                )
+            );
+        }
+
+        if (result.selfSigned)
+        {
+            result.findings.push_back(
+                makeFinding(
+                    SSLSeverity::MEDIUM,
+                    "SLP-SSL-SELFSIGNED",
+                    "Self-signed TLS certificate",
+                    "The server certificate is self-signed and "
+                    "may not be trusted by standard clients.",
+                    "Subject and issuer are identical.",
+                    "Use a certificate issued by a trusted "
+                    "certificate authority when appropriate.",
+                    100
+                )
+            );
+        }
 
         X509_free(certificate);
     }
 
-    addFindings(result);
+    /*
+     * TLS version assessment.
+     */
+
+    if (
+        result.tlsVersion == "TLSv1" ||
+        result.tlsVersion == "TLSv1.1"
+    )
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::HIGH,
+                "SLP-WEAK-TLS-VERSION",
+                "Legacy TLS protocol negotiated",
+                "The server negotiated a legacy TLS protocol "
+                "version that should generally no longer be used.",
+                result.tlsVersion,
+                "Disable legacy TLS protocols and require "
+                "TLS 1.2 or newer.",
+                100
+            )
+        );
+    }
+    else if (
+        result.tlsVersion == "TLSv1.2"
+    )
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::INFO,
+                "SLP-TLS12",
+                "TLS 1.2 negotiated",
+                "The service successfully negotiated TLS 1.2.",
+                result.tlsVersion,
+                "Prefer TLS 1.3 where supported while maintaining "
+                "compatibility requirements.",
+                100
+            )
+        );
+    }
+
+    /*
+     * Cipher assessment.
+     */
+
+    if (
+        result.cipher.find("RC4") != std::string::npos ||
+        result.cipher.find("3DES") != std::string::npos ||
+        result.cipher.find("DES") != std::string::npos ||
+        result.cipher.find("NULL") != std::string::npos ||
+        result.cipher.find("EXPORT") != std::string::npos
+    )
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::HIGH,
+                "SLP-WEAK-CIPHER",
+                "Weak TLS cipher negotiated",
+                "The negotiated TLS cipher indicates a legacy "
+                "or weak cryptographic configuration.",
+                result.cipher,
+                "Disable weak cipher suites and use modern "
+                "AEAD-based cipher suites.",
+                98
+            )
+        );
+    }
+
+    /*
+     * Certificate verification.
+     */
+
+    long verifyResult =
+        SSL_get_verify_result(
+            ssl
+        );
+
+    if (
+        verifyResult != X509_V_OK
+    )
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::HIGH,
+                "SLP-CERT-VERIFY",
+                "Certificate trust verification failed",
+                "OpenSSL could not establish a trusted "
+                "certificate chain for the TLS service.",
+                X509_verify_cert_error_string(
+                    verifyResult
+                ),
+                "Install a certificate issued by a trusted "
+                "certificate authority and provide the correct "
+                "certificate chain.",
+                100
+            )
+        );
+    }
+
+    /*
+     * TLS 1.3 is the preferred modern protocol.
+     */
+    if (
+        result.tlsVersion == "TLSv1.3"
+    )
+    {
+        result.findings.push_back(
+            makeFinding(
+                SSLSeverity::INFO,
+                "SLP-TLS13",
+                "Modern TLS protocol negotiated",
+                "The service successfully negotiated TLS 1.3.",
+                result.tlsVersion,
+                "Continue maintaining current TLS configuration "
+                "and monitor future cryptographic recommendations.",
+                100
+            )
+        );
+    }
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
 
-    close(socketFd);
-    SSL_CTX_free(ctx);
+    SSL_CTX_free(context);
 
     return result;
+}
+
+
+std::string SSLAuditor::nameFromCertificate(
+    void* certificate,
+    bool issuer
+)
+{
+    return certificateName(
+        static_cast<X509*>(certificate),
+        issuer
+    );
+}
+
+
+std::string SSLAuditor::certificateTime(
+    void* certificate,
+    bool notBefore
+)
+{
+    X509* cert =
+        static_cast<X509*>(certificate);
+
+    if (!cert)
+    {
+        return {};
+    }
+
+    return asn1TimeToString(
+        notBefore
+            ? X509_get0_notBefore(cert)
+            : X509_get0_notAfter(cert)
+    );
 }

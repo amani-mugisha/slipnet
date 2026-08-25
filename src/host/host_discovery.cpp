@@ -2,12 +2,11 @@
 
 #include "platform/ping.hpp"
 
-#include <future>
-#include <iostream>
-#include <thread>
-
 #include <cstdint>
+#include <future>
 #include <sstream>
+#include <string>
+#include <vector>
 
 
 namespace
@@ -17,9 +16,14 @@ uint32_t prefixToMask(
     int prefix
 )
 {
-    if (prefix == 0)
+    if (prefix <= 0)
     {
         return 0;
+    }
+
+    if (prefix >= 32)
+    {
+        return 0xFFFFFFFFu;
     }
 
     return
@@ -58,8 +62,18 @@ bool parseIPv4(
 
         try
         {
+            std::size_t position = 0;
+
             octet =
-                std::stoi(part);
+                std::stoi(
+                    part,
+                    &position
+                );
+
+            if (position != part.size())
+            {
+                return false;
+            }
         }
         catch (...)
         {
@@ -76,9 +90,7 @@ bool parseIPv4(
 
         result =
             (result << 8) |
-            static_cast<uint32_t>(
-                octet
-            );
+            static_cast<uint32_t>(octet);
 
         ++count;
     }
@@ -122,29 +134,69 @@ std::string ipv4ToString(
 } // namespace
 
 
-Host HostDiscovery::check(
+Host
+HostDiscovery::check(
     const std::string& ip
 ) const
 {
     Host result;
 
-    result.ip = ip;
-    result.reachable = false;
-    result.latencyMs = 0.0;
+    result.ip =
+        ip;
 
-    // host|:find accepts a single IPv4 address only.
-    // CIDR notation such as 192.168.1.0/24 is invalid here.
-    if (ip.find('/') != std::string::npos)
+    result.reachable =
+        false;
+
+    result.latencyMs =
+        0.0;
+
+
+    /*
+     * --------------------------------------------------------
+     * Host validation
+     * --------------------------------------------------------
+     *
+     * host|:find is a single-host operation.
+     *
+     * CIDR notation belongs to subnet/network discovery.
+     *
+     * Example:
+     *
+     *   Valid:
+     *       host|:find 10.108.155.140
+     *
+     *   Invalid:
+     *       host|:find 10.108.155.0/24
+     *
+     * The CLI layer can provide the user-facing explanation.
+     */
+
+    if (
+        ip.find('/') !=
+        std::string::npos
+    )
     {
         return result;
     }
 
-    // Continue with the normal host check...
+
+    /*
+     * --------------------------------------------------------
+     * Platform-specific reachability probe
+     * --------------------------------------------------------
+     *
+     * Linux:
+     *     src/platform/linux/ping_linux.cpp
+     *
+     * Windows:
+     *     src/platform/windows/ping_windows.cpp
+     */
 
     const auto pingResult =
         slipnet::platform::pingHost(
             ip
         );
+
 
     result.reachable =
         pingResult.reachable;
@@ -152,21 +204,8 @@ Host HostDiscovery::check(
     result.latencyMs =
         pingResult.latencyMs;
 
+
     return result;
-
-    if (ip.find('/') != std::string::npos)
-    {
-        std::cout
-            << "\n[!] Invalid host address.\n"
-            << "\n"
-            << "    host|:find expects a single IPv4 address.\n"
-            << "\n"
-            << "    Example:\n"
-            << "    host|:find 10.108.155.140\n"
-            << "\n";
-
-        return result;
-    }
 }
 
 
@@ -177,36 +216,75 @@ HostDiscovery::generateHosts(
 {
     std::vector<std::string> hosts;
 
-    std::size_t slash =
+
+    /*
+     * --------------------------------------------------------
+     * Parse CIDR
+     * --------------------------------------------------------
+     */
+
+    const std::size_t slash =
         cidr.find('/');
 
-    if (slash == std::string::npos)
+    if (
+        slash ==
+        std::string::npos
+    )
     {
         return hosts;
     }
 
-    std::string ip =
+
+    const std::string ip =
         cidr.substr(
             0,
             slash
         );
 
-    std::string prefixText =
+    const std::string prefixText =
         cidr.substr(
             slash + 1
         );
+
+
+    uint32_t address = 0;
+
+    if (
+        !parseIPv4(
+            ip,
+            address
+        )
+    )
+    {
+        return hosts;
+    }
+
 
     int prefix = 0;
 
     try
     {
+        std::size_t position = 0;
+
         prefix =
-            std::stoi(prefixText);
+            std::stoi(
+                prefixText,
+                &position
+            );
+
+        if (
+            position !=
+            prefixText.size()
+        )
+        {
+            return hosts;
+        }
     }
     catch (...)
     {
         return hosts;
     }
+
 
     if (
         prefix < 0 ||
@@ -216,81 +294,101 @@ HostDiscovery::generateHosts(
         return hosts;
     }
 
-    uint32_t ipValue = 0;
 
-    if (
-        !parseIPv4(
-            ip,
-            ipValue
-        )
-    )
-    {
-        return hosts;
-    }
+    /*
+     * --------------------------------------------------------
+     * Calculate network
+     * --------------------------------------------------------
+     */
 
-    uint32_t mask =
+    const uint32_t mask =
         prefixToMask(prefix);
 
-    uint32_t network =
-        ipValue & mask;
+    const uint32_t network =
+        address & mask;
 
-    uint32_t broadcast =
-        network | (~mask);
+
+    /*
+     * --------------------------------------------------------
+     * Generate addresses
+     * --------------------------------------------------------
+     *
+     * For IPv4 /24:
+     *
+     *     network     = x.x.x.0
+     *     broadcast   = x.x.x.255
+     *
+     * We exclude network and broadcast addresses.
+     */
 
     uint32_t firstHost =
         network;
 
     uint32_t lastHost =
-        broadcast;
+        network;
+
 
     if (prefix <= 30)
     {
+        const uint32_t hostCount =
+            1u << (32 - prefix);
+
         firstHost =
             network + 1;
 
         lastHost =
-            broadcast - 1;
+            network +
+            hostCount -
+            2;
     }
-
-    constexpr uint64_t MAX_HOSTS =
-        4096;
-
-    uint64_t hostCount =
-        static_cast<uint64_t>(
-            lastHost
-        ) -
-        static_cast<uint64_t>(
-            firstHost
-        ) +
-        1;
-
-    if (
-        hostCount >
-        MAX_HOSTS
-    )
+    else if (prefix == 31)
     {
-        std::cout
-            << "Subnet is too large.\n"
-            << "Maximum supported scan size: "
-            << MAX_HOSTS
-            << " hosts.\n";
+        firstHost =
+            network;
 
-        return hosts;
+        lastHost =
+            network + 1;
     }
+    else
+    {
+        /*
+         * /32 represents exactly one address.
+         */
+        firstHost =
+            network;
+
+        lastHost =
+            network;
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * Build host list
+     * --------------------------------------------------------
+     */
 
     for (
-        uint32_t current =
-            firstHost;
+        uint32_t current = firstHost;
         current <= lastHost;
         ++current
     )
     {
-        hosts.push_back(
+        hosts.emplace_back(
             ipv4ToString(
                 current
             )
         );
+
+        /*
+         * Prevent unsigned wraparound.
+         */
+        if (current == lastHost)
+        {
+            break;
+        }
     }
+
 
     return hosts;
 }
@@ -303,85 +401,88 @@ HostDiscovery::scanSubnet(
 {
     std::vector<Host> results;
 
-    std::vector<std::string> hosts =
-        generateHosts(cidr);
+
+    const auto hosts =
+        generateHosts(
+            cidr
+        );
+
 
     if (hosts.empty())
     {
         return results;
     }
 
-    unsigned int workerCount =
-        std::thread::hardware_concurrency();
 
-    if (workerCount == 0)
-    {
-        workerCount = 4;
-    }
+    /*
+     * --------------------------------------------------------
+     * Concurrent host discovery
+     * --------------------------------------------------------
+     *
+     * Limit concurrency to avoid creating an excessive number
+     * of simultaneous tasks.
+     */
 
-    if (workerCount > 32)
-    {
-        workerCount = 32;
-    }
+    constexpr std::size_t MAX_CONCURRENCY =
+        32;
 
-    std::vector<
-        std::future<Host>
-    > futures;
+
+    results.reserve(
+        hosts.size()
+    );
+
 
     for (
-        const auto& ip :
-        hosts
+        std::size_t index = 0;
+        index < hosts.size();
+        index += MAX_CONCURRENCY
     )
     {
-        futures.push_back(
-            std::async(
-                std::launch::async,
-                &HostDiscovery::check,
-                this,
-                ip
-            )
+        const std::size_t end =
+            std::min(
+                index + MAX_CONCURRENCY,
+                hosts.size()
+            );
+
+
+        std::vector<
+            std::future<Host>
+        > futures;
+
+
+        futures.reserve(
+            end - index
         );
 
-        if (
-            futures.size()
-            >= workerCount
+
+        for (
+            std::size_t i = index;
+            i < end;
+            ++i
         )
         {
-            for (
-                auto& future :
-                futures
-            )
-            {
-                Host host =
-                    future.get();
-
-                if (host.reachable)
-                {
-                    results.push_back(
-                        host
-                    );
-                }
-            }
-
-            futures.clear();
+            futures.emplace_back(
+                std::async(
+                    std::launch::async,
+                    &HostDiscovery::check,
+                    this,
+                    hosts[i]
+                )
+            );
         }
-    }
 
-    for (
-        auto& future :
-        futures
-    )
-    {
-        Host host =
-            future.get();
 
-        if (host.reachable)
+        for (
+            auto& future :
+            futures
+        )
         {
-            results.push_back(
-                host
+            results.emplace_back(
+                future.get()
             );
         }
     }
+
 
     return results;
 }

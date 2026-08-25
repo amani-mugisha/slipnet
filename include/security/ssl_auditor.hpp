@@ -1,9 +1,10 @@
 #pragma once
 
 #include <string>
+
 #include <vector>
 
-enum class TLSSeverity
+enum class SSLSeverity
 {
     INFO = 0,
     LOW = 1,
@@ -12,26 +13,28 @@ enum class TLSSeverity
     CRITICAL = 4
 };
 
-struct TLSFinding
+struct SSLFinding
 {
-    TLSSeverity severity =
-        TLSSeverity::INFO;
+    SSLSeverity severity = SSLSeverity::INFO;
 
     std::string id;
     std::string title;
     std::string description;
+    std::string evidence;
     std::string remediation;
+
+    int confidence = 0;
 };
 
 struct SSLAuditResult
 {
-    bool success = false;
+    bool connected = false;
+    bool tlsEstablished = false;
 
     std::string host;
-
     int port = 443;
 
-    std::string protocol;
+    std::string tlsVersion;
     std::string cipher;
 
     std::string subject;
@@ -40,14 +43,11 @@ struct SSLAuditResult
     std::string validFrom;
     std::string validUntil;
 
-    long daysRemaining = -1;
-
-    bool hostnameMatch = false;
     bool certificateValid = false;
+    bool certificateExpired = false;
+    bool selfSigned = false;
 
-    std::vector<TLSFinding> findings;
-
-    std::string error;
+    std::vector<SSLFinding> findings;
 };
 
 class SSLAuditor
@@ -55,18 +55,29 @@ class SSLAuditor
 public:
 
     SSLAuditResult audit(
-        const std::string& target
+        const std::string& host,
+        int port = 443
     ) const;
 
 private:
 
-    static bool parseTarget(
-        const std::string& input,
-        std::string& host,
-        int& port
+    static SSLFinding makeFinding(
+        SSLSeverity severity,
+        const std::string& id,
+        const std::string& title,
+        const std::string& description,
+        const std::string& evidence,
+        const std::string& remediation,
+        int confidence
     );
 
-    static void addFindings(
-        SSLAuditResult& result
+    static std::string nameFromCertificate(
+        void* certificate,
+        bool issuer
+    );
+
+    static std::string certificateTime(
+        void* certificate,
+        bool notBefore
     );
 };

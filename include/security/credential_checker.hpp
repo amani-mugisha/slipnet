@@ -20,15 +20,18 @@ struct CredentialFinding
     int port = 0;
 
     std::string service;
-
-    CredentialRisk risk =
-        CredentialRisk::INFO;
+    std::string version;
 
     std::string id;
     std::string title;
     std::string description;
     std::string evidence;
     std::string remediation;
+
+    CredentialRisk risk =
+        CredentialRisk::INFO;
+
+    int confidence = 0;
 };
 
 class CredentialChecker
@@ -36,13 +39,23 @@ class CredentialChecker
 public:
 
     std::vector<CredentialFinding>
-    analyze(
+    check(
         const std::vector<ServiceInfo>& services
     ) const;
 
 private:
 
-    void analyzeService(
+    void checkPlaintextAuthentication(
+        const ServiceInfo& service,
+        std::vector<CredentialFinding>& findings
+    ) const;
+
+    void checkRemoteAuthenticationExposure(
+        const ServiceInfo& service,
+        std::vector<CredentialFinding>& findings
+    ) const;
+
+    void checkDatabaseAuthenticationExposure(
         const ServiceInfo& service,
         std::vector<CredentialFinding>& findings
     ) const;
@@ -54,6 +67,7 @@ private:
         const std::string& title,
         const std::string& description,
         const std::string& evidence,
-        const std::string& remediation
+        const std::string& remediation,
+        int confidence
     );
 };

@@ -94,6 +94,23 @@ if(WIN32)
         # Packet capture
         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/packet_capture.cpp"
 
+        #information
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/session.cpp"
+        
+        # System info
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/system_windows.cpp"
+
+        # MAC resolution
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/mac_windows.cpp"
+
+        # DNS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/dns_windows.cpp"
+
+        # OS fingerprinting
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/os_fingerprint.cpp"
+
+        # Firewall probing
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/firewall_windows.cpp"
 
     )
 
@@ -130,6 +147,25 @@ elseif(UNIX)
         # Packet capture
         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/packet_capture.cpp"
 
+        #information
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/session.cpp"
+        
+        # System info
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/system_linux.cpp"
+
+        # MAC resolution
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/mac_linux.cpp"
+
+        # DNS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/dns_linux.cpp"
+
+        # OS fingerprinting
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/os_fingerprint.cpp"
+
+        # Firewall probing
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/firewall_linux.cpp"
+
+        
 
     )
 
@@ -179,12 +215,32 @@ endif()
 
 if(WIN32)
 
+    set(NPCAP_SDK_DIR
+        "C:/npcap-sdk"
+        CACHE PATH "Npcap SDK installation directory"
+    )
+
+    set(NPCAP_INCLUDE_DIR
+        "${NPCAP_SDK_DIR}/Include"
+    )
+
+    set(NPCAP_LIB_DIR
+        "${NPCAP_SDK_DIR}/Lib/x64"
+    )
+
+    # Npcap headers
+    target_include_directories(slipnet
+        PRIVATE
+            "${NPCAP_INCLUDE_DIR}"
+    )
+
+    # Windows networking + Npcap
     target_link_libraries(slipnet
         PRIVATE
             ws2_32
             iphlpapi
-            wpcap
-            Packet
+            "${NPCAP_LIB_DIR}/wpcap.lib"
+            "${NPCAP_LIB_DIR}/Packet.lib"
     )
 
 endif()

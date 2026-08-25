@@ -1,7 +1,5 @@
 #pragma once
 
-#include "core/network_state.hpp"
-
 #include <string>
 #include <vector>
 
@@ -22,6 +20,8 @@ struct FirewallObservation
     FirewallState state =
         FirewallState::UNKNOWN;
 
+    int latencyMs = -1;
+
     std::string evidence;
 };
 
@@ -32,12 +32,13 @@ struct FirewallReport
     int observed = 0;
     int open = 0;
     int closed = 0;
+    int filtered = 0;
     int unknown = 0;
+
+    bool hasEvidenceOfFiltering = false;
 
     std::vector<FirewallObservation>
         observations;
-
-    bool hasEvidenceOfFiltering = false;
 
     std::string conclusion;
 };
@@ -48,13 +49,13 @@ public:
 
     FirewallReport analyze(
         const std::string& host,
-        const std::vector<PortInfo>& ports
+        const std::vector<int>& ports
     ) const;
 
 private:
 
-    static FirewallState classify(
-        const PortInfo& port
+    static FirewallState convertState(
+        int state
     );
 
     static std::string stateName(

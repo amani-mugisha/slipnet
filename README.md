@@ -1,160 +1,133 @@
 # SlipNet
 
-### Network Intelligence Engine
+**Network Intelligence Engine**
 
-SlipNet is a modern **C++20 network intelligence CLI** designed to discover, analyze, monitor, and understand network environments from the command line.
+SlipNet is a modern C++20 network intelligence CLI for discovering, analyzing, monitoring, and understanding network environments from the command line.
 
-It combines network discovery, host analysis, port scanning, service detection, packet inspection, topology mapping, security analysis, and AI-assisted intelligence into a modular network analysis engine.
+It unifies network discovery, host analysis, port scanning, service detection, packet inspection, topology mapping, security analysis, and AI-assisted intelligence into a single modular engine.
 
-> **Status:** Active development — SlipNet is currently evolving toward a complete network intelligence and security analysis platform.
+> SlipNet v0.1.0 is the first completed version of the project and establishes the core network intelligence and security analysis foundation.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [CLI](#cli)
+- [Architecture](#architecture)
+- [Building SlipNet](#building-slipnet)
+- [Development Philosophy](#development-philosophy)
+- [Roadmap](#roadmap)
+- [Security Philosophy](#security-philosophy)
+- [Project Status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
+- [Author](#author)
 
 ---
 
 ## Overview
 
-Modern networks generate large amounts of information: hosts, interfaces, ports, services, packets, connections, and security events.
+Modern networks generate large volumes of information — hosts, interfaces, ports, services, packets, connections, and security events. SlipNet turns that raw information into structured intelligence.
 
-SlipNet is being built to turn that raw network information into structured intelligence.
+The project follows a modular architecture in which independent engines collect and analyze different layers of network data:
 
-The project follows a modular architecture where individual engines collect and analyze different layers of network information.
-
-```text
+```
                     ┌─────────────────────┐
-                    │     SlipNet CLI      │
+                    │      SlipNet CLI     │
                     └──────────┬──────────┘
                                │
-             ┌─────────────────┼─────────────────┐
-             │                 │                 │
-             ▼                 ▼                 ▼
-       Network Engine     Security Engine    AI Engine
-             │                 │                 │
-      ┌──────┼──────┐          │                 │
-      │      │      │          │                 │
-      ▼      ▼      ▼          ▼                 ▼
-   Hosts   Ports  Services   Alerts          Analysis
-      │      │      │          │                 │
-      └──────┴──────┴──────────┴─────────────────┘
-                         │
-                         ▼
-                  Network Intelligence
+                 ┌─────────────┼─────────────┐
+                 │             │             │
+                 ▼             ▼             ▼
+          Network Engine  Security Engine  AI Engine
+                 │             │             │
+          ┌──────┼──────┐      │             │
+          │      │      │      │             │
+          ▼      ▼      ▼      ▼             ▼
+        Hosts  Ports Services Alerts      Analysis
+          │      │      │      │             │
+          └──────┴──────┴──────┴─────────────┘
+                               │
+                               ▼
+                     Network Intelligence
 ```
 
+---
 
 ## Features
 
 ### Network Discovery
-
-SlipNet provides the foundation for discovering and understanding the local network environment.
-
-* Network interface discovery
-* IP address handling
-* Network mask detection
-* Subnet calculation
-* Host discovery
-* Network state management
+- Network interface discovery
+- IP address handling and network mask detection
+- Subnet calculation
+- Host discovery and network state management
 
 ### Host Intelligence
-
-SlipNet maintains structured information about discovered hosts, including:
-
-* IP addresses
-* Hostnames
-* Online/offline state
-* Network latency
-* Host status
+Structured information about discovered hosts, including IP addresses, hostnames, online/offline state, latency, and status.
 
 ### Port Analysis
-
-The port analysis engine is designed to identify exposed network services and build an understanding of a host's reachable attack surface.
-
-Current architecture supports:
-
-* Port discovery
-* Open/closed state
-* Protocol information
-* Service association
-* Per-host port state
+Identifies exposed network services and builds an understanding of a host's reachable attack surface.
+- Port discovery and open/closed state
+- Protocol and service association
+- Per-host port state
+- Common and custom TCP port range scanning
 
 ### Service Detection
+- Service name, protocol, port, and version
+- Banner information and detection status
+- Foundation for vulnerability and security analysis
 
-SlipNet includes a service detection layer for identifying services associated with discovered ports.
+### Subnet Analysis
+Analysis engine for IPv4 CIDR networks, including network/broadcast/netmask/wildcard calculation, prefix identification, total and usable host counts, and private/public address classification.
 
-The service model supports:
-
-* Service name
-* Protocol
-* Port
-* Version
-* Banner information
-* Detection status
-
-This information also provides the foundation for future vulnerability and security intelligence.
+### Network Intelligence
+Combines information from all engines into a shared network state — hosts, ports, services, network info, security findings, monitoring data, and topology — so information can be reused across commands rather than treated in isolation.
 
 ### Security Analysis
+A defensive, rule-based security engine covering:
+- Legacy protocol exposure (FTP, Telnet)
+- Database exposure (MySQL/MariaDB, PostgreSQL, MongoDB)
+- Remote access exposure (SSH, RDP, SMB)
+- Large attack-surface detection
+- Vulnerability and credential exposure heuristics
+- Firewall analysis and TLS security analysis
 
-SlipNet includes a defensive, rule-based security analysis engine.
+Findings are represented as structured alerts with an ID, title, description, severity, evidence, confidence, and remediation guidance.
 
-Current checks include:
+**Severity levels:**
 
-* Legacy protocol exposure
-* FTP exposure
-* Telnet exposure
-* Database exposure
-* MySQL/MariaDB exposure
-* PostgreSQL exposure
-* MongoDB exposure
-* SSH exposure
-* RDP exposure
-* SMB exposure
-* Large attack-surface detection
+| Level | Meaning |
+|---|---|
+| 0 | Informational |
+| 1 | Low |
+| 2 | Medium |
+| 3 | High |
+| 4 | Critical |
 
-Security findings are represented as structured alerts with:
+### Vulnerability Assessment
+Identifies potential security exposures from discovered services using conservative heuristics rather than confirmed CVE claims — covering exposed FTP, Telnet, SMB, RDP, and database services, as well as potentially outdated or legacy service versions. Findings include evidence, confidence levels, and remediation.
 
-```text
-Type
-Description
-Severity
-```
+### Credential Exposure Analysis
+Identifies potential credential exposure risks associated with discovered services. **No credentials are collected, tested, or brute-forced.** Provides exposure indicators, severity classification, evidence, and recommendations.
 
-Severity levels currently range from:
+### Firewall Analysis
+Evaluates observed TCP port behavior and classifies ports as `OPEN`, `CLOSED`, `FILTERED`, or `UNKNOWN`. The scanner is conservative and does not claim a closed port proves firewall filtering; results are backed by evidence and a stated conclusion.
 
-```text
-0 → Informational
-1 → Low
-2 → Medium
-3 → High
-```
+### TLS Security Analysis
+Evaluates detected secure services and surfaces potential security configuration concerns, with findings that can be validated against actual service configuration and current recommendations.
 
 ### Packet Analysis
-
-SlipNet contains a packet analysis layer intended for:
-
-* Packet capture
-* Packet inspection
-* Protocol analysis
-* Traffic intelligence
-
-This subsystem is currently being expanded.
+Foundation layer for packet capture, inspection, protocol analysis, and traffic intelligence — to be expanded in future releases.
 
 ### Network Monitoring
-
-The monitoring subsystem provides the foundation for continuously observing network activity and generating network statistics.
-
-Future development will expand this into:
-
-* Traffic monitoring
-* Connection statistics
-* Bandwidth analysis
-* Network activity trends
-* Anomaly detection
+Foundation for continuous observation of network activity and statistics generation. Planned expansion includes traffic monitoring, connection statistics, bandwidth analysis, activity trends, and anomaly detection.
 
 ### Network Topology
+Subsystem for representing discovered network nodes and relationships, with the long-term goal of producing a full network topology map:
 
-SlipNet includes a topology mapping subsystem for representing discovered network nodes and relationships.
-
-The long-term objective is to transform discovered network information into an understandable topology such as:
-
-```text
+```
                          ┌──────────────┐
                          │   Gateway    │
                          │ 192.168.1.1  │
@@ -169,37 +142,70 @@ The long-term objective is to transform discovered network information into an u
           └────────────┘  └────────────┘  └────────────┘
 ```
 
+### DNS Intelligence
+Hostname resolution, IP resolution, reverse DNS lookup, and DNS-based network information.
+
+### MAC Address Intelligence
+MAC address discovery, interface association, and hardware vendor identification (where supported by the OS).
+
+### Operating System Fingerprinting
+Heuristic layer that estimates the likely OS family of a target host. Results are treated as heuristic intelligence rather than guaranteed identification.
+
+### Banner Analysis
+Retrieves available service/application banner information from reachable TCP services, supporting service identification, version detection, and security analysis.
+
 ### AI-Assisted Analysis
+Transforms raw network measurements into higher-level intelligence:
 
-SlipNet contains an AI analysis subsystem designed to eventually transform raw network measurements into higher-level intelligence.
-
-The planned pipeline is:
-
-```text
-Network Data
-     │
-     ▼
-Feature Extraction
-     │
-     ▼
-AI Analysis
-     │
-     ▼
-Risk / Anomaly Assessment
-     │
-     ▼
-Human-readable Intelligence
+```
+Network Data → Feature Extraction → AI Analysis → Risk/Anomaly Assessment → Human-readable Intelligence
 ```
 
-The AI layer is currently under development.
+This layer will become more advanced in future releases.
 
 ---
 
-# Architecture
+## CLI
 
-SlipNet follows a modular C++ architecture designed to keep network components independent and extensible.
+SlipNet uses an interactive command-line interface built around a `category|:action` structure:
 
-```text
+| Command | Description |
+|---|---|
+| `ip\|:seek` | IP discovery |
+| `host\|:find` | Host discovery |
+| `port\|:scan` | Port scanning |
+| `svc\|:detect` | Service detection |
+| `topo\|:map` | Topology mapping |
+| `mac\|:resolve` | MAC address resolution |
+| `dns\|:resolve` | DNS resolution |
+| `os\|:fingerprint` | OS fingerprinting |
+| `banner\|:grab` | Banner grabbing |
+| `subnet\|:calc` | Subnet calculation |
+| `pkt\|:capture` | Packet capture |
+| `pkt\|:inspect` | Packet inspection |
+| `net\|:monitor` | Network monitoring |
+| `net\|:show` | Show network state |
+| `net\|:clear` | Clear network state |
+| `sec\|:detect` | Security detection |
+| `vuln\|:scan` | Vulnerability scanning |
+| `cred\|:check` | Credential exposure check |
+| `ssl\|:audit` | TLS/SSL audit |
+| `firewall\|:probe` | Firewall probing |
+| `ai\|:analyze` | AI-assisted analysis |
+| `session\|:info` | Session information |
+| `system\|:info` | System information |
+| `help` | Command help |
+| `fire` | — |
+
+The command interface will continue to evolve as the underlying engines become more capable.
+
+---
+
+## Architecture
+
+SlipNet follows a modular C++ architecture that keeps network components independent and extensible.
+
+```
 slipnet/
 │
 ├── include/
@@ -213,7 +219,8 @@ slipnet/
 │   ├── port/
 │   ├── security/
 │   ├── service/
-│   └── topology/
+│   ├── topology/
+│   └── platform/
 │
 ├── src/
 │   ├── ai/
@@ -227,6 +234,9 @@ slipnet/
 │   ├── security/
 │   ├── service/
 │   ├── topology/
+│   ├── platform/
+│   │   ├── linux/
+│   │   └── windows/
 │   └── main.cpp
 │
 ├── CMakeLists.txt
@@ -235,129 +245,109 @@ slipnet/
 
 ### Core Components
 
-| Component    | Responsibility                                         |
-| ------------ | ------------------------------------------------------ |
-| `cli`        | Command parsing, terminal interaction, signal handling |
-| `core`       | Shared network state and engine context                |
-| `network`    | IP, subnet, interface and network discovery            |
-| `host`       | Host discovery and host intelligence                   |
-| `port`       | Port analysis and scanning                             |
-| `service`    | Service identification                                 |
-| `packet`     | Packet capture and inspection                          |
-| `monitoring` | Network monitoring and statistics                      |
-| `security`   | Defensive security analysis and alerts                 |
-| `topology`   | Network topology representation                        |
-| `ai`         | Feature extraction and intelligent analysis            |
+| Component | Responsibility |
+|---|---|
+| `cli` | Command parsing, terminal interaction, signal handling |
+| `core` | Shared network state and engine context |
+| `network` | IP, subnet, interface, and network discovery |
+| `host` | Host discovery and host intelligence |
+| `port` | Port analysis and scanning |
+| `service` | Service identification |
+| `packet` | Packet capture and inspection |
+| `monitoring` | Network monitoring and statistics |
+| `security` | Defensive security analysis and alerts |
+| `topology` | Network topology representation |
+| `ai` | Feature extraction and intelligent analysis |
+| `platform` | Operating-system-specific network implementations |
+
+### Platform Architecture
+
+SlipNet uses a cross-platform architecture with separate implementations for Windows and Linux. The command interface and common engines are shared, while OS-specific functionality lives in the corresponding platform layer. Each executable targets the operating system on which it is built and executed.
+
+```
+                    SlipNet
+                       │
+              ┌────────┴────────┐
+              │                 │
+           Common             Platform
+           Engine              Layer
+              │                 │
+       ┌──────┴──────┐      ┌───┴────┐
+       │             │      │        │
+       ▼             ▼      ▼        ▼
+     Linux         Windows Linux   Windows
+    Build          Build  Impl.     Impl.
+```
 
 ---
 
-# CLI
+## Building SlipNet
 
-SlipNet is designed around an interactive command-line interface.
+### Requirements
 
-The command system follows a category/action structure:
+**Linux**
+- C++20-compatible compiler
+- CMake 3.20+
+- POSIX threading support
+- OpenSSL
 
-```text
-category|:action
-```
+Tested with GCC 11.4, CMake 3.22+, and C++20.
 
-Examples of the current command architecture include:
+**Windows**
+- C++20-compatible compiler
+- CMake 3.20+
+- OpenSSL
+- Windows networking libraries
 
-```text
-ip|:seek
-host|:find
-port|:scan
-svc|:detect
-topo|:map
-pkt|:capture
-pkt|:inspect
-net|:monitor
-net|:show
-net|:clear
-sec|:detect
-ai|:analyze
-session|:info
-help
-fire
-```
-
-The command interface will continue to evolve as the underlying engines become more capable.
-
----
-
-# Building SlipNet
-
-## Requirements
-
-SlipNet currently requires:
-
-* Linux
-* C++20-compatible compiler
-* CMake 3.20+
-* POSIX threading support
-
-The current development environment has been tested with:
-
-```text
-GCC 11.4
-CMake 3.22+
-C++20
-```
-
-## Clone
+### Clone
 
 ```bash
 git clone <YOUR_REPOSITORY_URL>
 cd slipnet
 ```
 
-## Configure
+### Linux Build
 
 ```bash
-mkdir build
-cd build
+mkdir build && cd build
 cmake ..
-```
-
-## Build
-
-```bash
 cmake --build . -j$(nproc)
 ```
 
-The executable will be generated as:
-
-```text
-build/slipnet
-```
-
-## Run
-
-From the `build` directory:
+The executable is generated at `build/slipnet`.
 
 ```bash
 ./slipnet
 ```
 
+### Windows Build
+
+```bash
+mkdir build
+cd build
+cmake ..
+cmake --build . --config Release
+```
+
+The executable is generated in the corresponding Windows build configuration directory.
+
 ---
 
-# Development
+## Development Philosophy
 
-SlipNet is being developed incrementally.
+SlipNet is developed incrementally: reliable network primitives first, then combined into higher-level intelligence.
 
-The development philosophy is to build reliable network primitives first and then combine them into higher-level intelligence.
-
-```text
+```
                     SlipNet
                        │
                        ▼
               Network Discovery
                        │
                        ▼
-                 Host Discovery
+                Host Discovery
                        │
                        ▼
-                  Port Analysis
+                 Port Analysis
                        │
                        ▼
                 Service Detection
@@ -377,119 +367,98 @@ The development philosophy is to build reliable network primitives first and the
               Network Intelligence
 ```
 
-This approach allows each subsystem to become useful independently while also contributing data to higher-level analysis.
+This approach allows each subsystem to be useful independently while also feeding data into higher-level analysis.
 
 ---
 
-# Project Phases Roadmap
+## Roadmap
 
-## Phase 1 — Core Engine
+### Phase 1 — Core Engine ✅
+- [x] C++20 project architecture
+- [x] CMake build system
+- [x] Interactive CLI foundation
+- [x] Network state management
+- [x] Network interface architecture
+- [x] Host discovery architecture
+- [x] Security detection foundation
+- [x] AI analysis foundation
+- [x] Cross-platform architecture
+- [x] Linux platform implementation
+- [x] Windows platform implementation
 
-* [x] C++20 project architecture
-* [x] CMake build system
-* [x] Interactive CLI foundation
-* [x] Network state management
-* [x] Network interface architecture
-* [x] Host discovery architecture
-* [x] Security detection foundation
-* [x] AI analysis foundation
+### Phase 2 — Network Intelligence
+- [ ] Improve network discovery
+- [ ] Improve host discovery
+- [ ] Expand subnet analysis
+- [ ] Improve TCP port scanning
+- [ ] Improve service detection
+- [ ] Structured scan results
+- [ ] Better CLI output
 
-## Phase 2 — Network Intelligence
+### Phase 3 — Security Intelligence
+- [ ] Expand security rules
+- [ ] Structured security reports
+- [ ] Risk scoring
+- [ ] Security finding prioritization
+- [ ] Service-version intelligence
+- [ ] Configuration exposure analysis
+- [ ] Security event history
 
-* [ ] Improve network discovery
-* [ ] Improve host discovery
-* [ ] Expand subnet analysis
-* [ ] Improve TCP port scanning
-* [ ] Improve service detection
-* [ ] Structured scan results
-* [ ] Better CLI output
+### Phase 4 — Packet Intelligence
+- [ ] Packet capture improvements
+- [ ] Packet decoding
+- [ ] Protocol identification
+- [ ] Traffic statistics
+- [ ] Connection tracking
+- [ ] Suspicious traffic detection
 
-## Phase 3 — Security Intelligence
+### Phase 5 — Network Topology
+- [ ] Automatic topology generation
+- [ ] Host relationship mapping
+- [ ] Gateway identification
+- [ ] Network graph export
+- [ ] Interactive topology visualization
 
-* [ ] Expand security rules
-* [ ] Structured security reports
-* [ ] Risk scoring
-* [ ] Security finding prioritization
-* [ ] Service-version intelligence
-* [ ] Configuration exposure analysis
-* [ ] Security event history
+### Phase 6 — AI Intelligence
+- [ ] Network feature extraction
+- [ ] Anomaly detection
+- [ ] Risk prediction
+- [ ] Security event classification
+- [ ] AI-generated network summaries
+- [ ] Intelligent recommendations
 
-## Phase 4 — Packet Intelligence
+### Phase 7 — Stable Release
 
-* [ ] Packet capture improvements
-* [ ] Packet decoding
-* [ ] Protocol identification
-* [ ] Traffic statistics
-* [ ] Connection tracking
-* [ ] Suspicious traffic detection
-
-## Phase 5 — Network Topology
-
-* [ ] Automatic topology generation
-* [ ] Host relationship mapping
-* [ ] Gateway identification
-* [ ] Network graph export
-* [ ] Interactive topology visualization
-
-## Phase 6 — AI Intelligence
-
-* [ ] Network feature extraction
-* [ ] Anomaly detection
-* [ ] Risk prediction
-* [ ] Security event classification
-* [ ] AI-generated network summaries
-* [ ] Intelligent recommendations
-
-## Phase 7 — Stable Release
-
-The long-term objective is a stable SlipNet release capable of providing:
-
-```text
-Discovery
-    +
-Monitoring
-    +
-Security Analysis
-    +
-Topology Intelligence
-    +
-AI Analysis
-    =
-Network Intelligence Platform
-```
+The long-term objective is a stable SlipNet release combining Discovery, Monitoring, Security Analysis, Topology Intelligence, and AI Analysis into a complete **Network Intelligence Platform**.
 
 ---
 
-# Security Philosophy
+## Security Philosophy
 
-SlipNet is being developed primarily as a **defensive network intelligence and security analysis tool**.
+SlipNet is developed primarily as a **defensive** network intelligence and security analysis tool. Its security engine analyzes information collected by SlipNet's own discovery and analysis components to help users:
 
-Its security engine is designed to analyze information already collected by SlipNet's network discovery and analysis components.
+- Understand their network
+- Identify exposed services
+- Analyze network attack surface
+- Detect suspicious conditions
+- Understand network relationships
+- Make informed defensive decisions
 
-The project aims to help users:
-
-* Understand their network
-* Identify exposed services
-* Analyze network attack surface
-* Detect suspicious conditions
-* Understand network relationships
-* Make informed defensive decisions
-
-Only scan and analyze systems and networks that you own or have explicit authorization to assess.
+> **Only scan and analyze systems and networks that you own or have explicit authorization to assess.**
 
 ---
 
-# Project Status
+## Project Status
 
-SlipNet is currently in **early active development**.
+**SlipNet v0.1.0 — Completed**
 
-The architecture and core subsystems are being implemented incrementally. Some components currently provide foundational functionality and are expected to become significantly more capable in future releases.
+Version 0.1.0 establishes the first complete foundation of SlipNet, including network discovery, host discovery, port scanning, service detection, subnet calculation, topology and packet analysis foundations, network monitoring foundation, security analysis, vulnerability assessment, credential exposure analysis, TLS auditing, firewall analysis, AI analysis foundation, Linux and Windows platform support, and an interactive CLI.
 
-Expect breaking changes while the project is under active development.
+Future versions will focus on expanding intelligence, visualization, security, monitoring, and AI capabilities. Breaking changes may occur as SlipNet continues to evolve.
 
 ---
 
-# Contributing
+## Contributing
 
 Contributions, ideas, bug reports, and technical discussions are welcome.
 
@@ -504,18 +473,14 @@ Before submitting a contribution:
 
 ---
 
-# License
+## License
 
 License information will be added before the first stable release.
 
 ---
 
-# Author
+## Author
 
 **Amani Mugisha**
 
 SlipNet is an independent project focused on building practical network intelligence and security technology with modern C++.
-
----
-
-> **SlipNet — Discover. Analyze. Understand.**

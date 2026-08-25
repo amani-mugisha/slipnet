@@ -7,6 +7,7 @@
 #endif
 
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 
 #include <string>
@@ -15,9 +16,11 @@
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-namespace slipnet::platform {
+namespace slipnet::platform
+{
 
-namespace {
+namespace
+{
 
 std::string wideToString(
     const wchar_t* value
@@ -37,6 +40,7 @@ std::string wideToString(
 }
 
 } // namespace
+
 
 LocalTopologyInfo getLocalTopologyInfo()
 {
@@ -88,8 +92,8 @@ LocalTopologyInfo getLocalTopologyInfo()
     )
     {
         if (
-            adapter->OperStatus
-            != IfOperStatusUp
+            adapter->OperStatus !=
+            IfOperStatusUp
         )
         {
             continue;
@@ -99,8 +103,8 @@ LocalTopologyInfo getLocalTopologyInfo()
          * Ignore loopback adapters.
          */
         if (
-            adapter->IfType
-            == IF_TYPE_SOFTWARE_LOOPBACK
+            adapter->IfType ==
+            IF_TYPE_SOFTWARE_LOOPBACK
         )
         {
             continue;
@@ -125,16 +129,16 @@ LocalTopologyInfo getLocalTopologyInfo()
         )
         {
             if (
-                address->Address.lpSockaddr
-                == nullptr
+                address->Address.lpSockaddr ==
+                nullptr
             )
             {
                 continue;
             }
 
             if (
-                address->Address.lpSockaddr->sa_family
-                != AF_INET
+                address->Address.lpSockaddr->sa_family !=
+                AF_INET
             )
             {
                 continue;
@@ -142,13 +146,13 @@ LocalTopologyInfo getLocalTopologyInfo()
 
             char ipBuffer[INET_ADDRSTRLEN]{};
 
-            auto* ipv4 =
-                reinterpret_cast<SOCKADDR_IN*>(
+            const auto* ipv4 =
+                reinterpret_cast<const SOCKADDR_IN*>(
                     address->Address.lpSockaddr
                 );
 
             if (
-                InetNtopA(
+                inet_ntop(
                     AF_INET,
                     &ipv4->sin_addr,
                     ipBuffer,
@@ -167,31 +171,33 @@ LocalTopologyInfo getLocalTopologyInfo()
          * Find default gateway.
          */
         if (
-            adapter->FirstGatewayAddress
-            != nullptr
+            adapter->FirstGatewayAddress !=
+            nullptr
         )
         {
             auto* gateway =
                 adapter->FirstGatewayAddress;
 
             if (
-                gateway->Address.lpSockaddr
-                != nullptr &&
-                gateway->Address.lpSockaddr->sa_family
-                == AF_INET
+                gateway->Address.lpSockaddr !=
+                    nullptr &&
+                gateway->Address.lpSockaddr->sa_family ==
+                    AF_INET
             )
             {
                 char gatewayBuffer[
                     INET_ADDRSTRLEN
                 ]{};
 
-                auto* ipv4 =
-                    reinterpret_cast<SOCKADDR_IN*>(
+                const auto* ipv4 =
+                    reinterpret_cast<
+                        const SOCKADDR_IN*
+                    >(
                         gateway->Address.lpSockaddr
                     );
 
                 if (
-                    InetNtopA(
+                    inet_ntop(
                         AF_INET,
                         &ipv4->sin_addr,
                         gatewayBuffer,
@@ -218,4 +224,4 @@ LocalTopologyInfo getLocalTopologyInfo()
 
 } // namespace slipnet::platform
 
-#endif
+#endif // _WIN32

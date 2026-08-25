@@ -25,8 +25,4 @@ private:
     std::string normalizeMac(
         const std::string& mac
     ) const;
-
-    std::string lookupVendor(
-        const std::string& mac
-    ) const;
 };

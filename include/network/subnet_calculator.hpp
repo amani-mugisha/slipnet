@@ -18,6 +18,8 @@ struct SubnetInfo
     std::string netmask;
     std::string wildcard;
 
+    std::string addressType;
+
     int prefix = 0;
 
     std::uint64_t totalAddresses = 0;
@@ -34,11 +36,26 @@ public:
 
 private:
 
+    bool parseCIDR(
+        const std::string& cidr,
+        std::string& ip,
+        int& prefix
+    ) const;
+
+    bool parsePrefix(
+        const std::string& value,
+        int& prefix
+    ) const;
+
     std::uint32_t parseIPv4(
         const std::string& ip
     ) const;
 
     std::string formatIPv4(
         std::uint32_t value
+    ) const;
+
+    std::string classifyAddress(
+        std::uint32_t address
     ) const;
 };

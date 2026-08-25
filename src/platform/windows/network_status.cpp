@@ -6,8 +6,12 @@
 #define NOMINMAX
 #endif
 
+/*
+ * Winsock must be included before Windows headers.
+ */
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <iphlpapi.h>
 
 #include <string>
@@ -55,9 +59,9 @@ std::string ipv4ToString(
     char buffer[INET_ADDRSTRLEN]{};
 
     const auto* ipv4 =
-        reinterpret_cast<const SOCKADDR_IN*>(
-            address
-        );
+        reinterpret_cast<
+            const SOCKADDR_IN*
+        >(address);
 
     if (
         inet_ntop(
@@ -86,26 +90,12 @@ NetworkStatus getNetworkStatus(
     status.interfaceName =
         interfaceName;
 
-    ULONG bufferSize = 0;
-
-    DWORD result =
-        GetIfTable2(nullptr, &bufferSize);
-
-    if (
-        result != ERROR_INSUFFICIENT_BUFFER
-    )
-    {
-        return status;
-    }
-
     /*
      * GetIfTable2 allocates the table itself.
-     * bufferSize is only used to detect API
-     * availability, so request the table again.
      */
     MIB_IF_TABLE2* table = nullptr;
 
-    result =
+    DWORD result =
         GetIfTable2(&table);
 
     if (
@@ -135,6 +125,10 @@ NetworkStatus getNetworkStatus(
                 row.Description
             );
 
+        /*
+         * Match either the Windows interface
+         * alias or its description.
+         */
         if (
             interfaceName != name &&
             interfaceName != description
@@ -143,7 +137,8 @@ NetworkStatus getNetworkStatus(
             continue;
         }
 
-        status.interfaceName = name;
+        status.interfaceName =
+            name;
 
         status.up =
             row.OperStatus ==
@@ -175,19 +170,118 @@ NetworkStatus getNetworkStatus(
         status.txDropped =
             row.OutDiscards;
 
-        status.ipv4Address.clear();
+        /*
+         * Find IPv4 address for this interface.
+         */
+        ULONG addressBufferSize = 0;
 
-        FreeMibTable(table);
+        ULONG addressResult =
+            GetAdaptersAddresses(
+                AF_INET,
+                GAA_FLAG_INCLUDE_PREFIX,
+                nullptr,
+                nullptr,
+                &addressBufferSize
+            );
 
-        return status;
+        if (
+            addressResult ==
+            ERROR_BUFFER_OVERFLOW
+        )
+        {
+            std::vector<unsigned char>
+                addressBuffer(
+                    addressBufferSize
+                );
+
+            auto* adapters =
+                reinterpret_cast<
+                    IP_ADAPTER_ADDRESSES*
+                >(
+                    addressBuffer.data()
+                );
+
+            addressResult =
+                GetAdaptersAddresses(
+                    AF_INET,
+                    GAA_FLAG_INCLUDE_PREFIX,
+                    nullptr,
+                    adapters,
+                    &addressBufferSize
+                );
+
+            if (
+                addressResult ==
+                NO_ERROR
+            )
+            {
+                for (
+                    auto* adapter = adapters;
+                    adapter != nullptr;
+                    adapter = adapter->Next
+                )
+                {
+                    if (
+                        adapter->IfIndex !=
+                        row.InterfaceIndex
+                    )
+                    {
+                        continue;
+                    }
+
+                    for (
+                        auto* address =
+                            adapter->FirstUnicastAddress;
+                        address != nullptr;
+                        address =
+                            address->Next
+                    )
+                    {
+                        const std::string ipv4 =
+                            ipv4ToString(
+                                address->Address.lpSockaddr
+                            );
+
+                        if (!ipv4.empty())
+                        {
+                            status.ipv4Address =
+                                ipv4;
+
+                            break;
+                        }
+                    }
+
+                    if (
+                        !status.ipv4Address.empty()
+                    )
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        break;
     }
 
+    /*
+     * GetIfTable2 allocates the table.
+     * Release it after use.
+     */
     FreeMibTable(table);
 
     return status;
 }
 
 
+/*
+ * ------------------------------------------------------------
+ * Detect active network interface
+ * ------------------------------------------------------------
+ *
+ * Returns the Windows friendly name of the first active,
+ * non-loopback interface that has an IPv4 address.
+ */
 std::string detectActiveInterface()
 {
     ULONG bufferSize = 0;
@@ -213,7 +307,9 @@ std::string detectActiveInterface()
     );
 
     auto* adapters =
-        reinterpret_cast<IP_ADAPTER_ADDRESSES*>(
+        reinterpret_cast<
+            IP_ADAPTER_ADDRESSES*
+        >(
             buffer.data()
         );
 
@@ -226,7 +322,9 @@ std::string detectActiveInterface()
             &bufferSize
         );
 
-    if (result != NO_ERROR)
+    if (
+        result != NO_ERROR
+    )
     {
         return {};
     }
@@ -237,6 +335,9 @@ std::string detectActiveInterface()
         adapter = adapter->Next
     )
     {
+        /*
+         * Interface must be operational.
+         */
         if (
             adapter->OperStatus !=
             IfOperStatusUp
@@ -245,6 +346,9 @@ std::string detectActiveInterface()
             continue;
         }
 
+        /*
+         * Ignore loopback interfaces.
+         */
         if (
             adapter->IfType ==
             IF_TYPE_SOFTWARE_LOOPBACK
@@ -253,34 +357,98 @@ std::string detectActiveInterface()
             continue;
         }
 
-        if (
-            adapter->FirstUnicastAddress == nullptr
+        /*
+         * Make sure the interface has an IPv4
+         * address before considering it active.
+         */
+        bool hasIPv4 = false;
+
+        for (
+            auto* address =
+                adapter->FirstUnicastAddress;
+            address != nullptr;
+            address = address->Next
         )
+        {
+            if (
+                address->Address.lpSockaddr ==
+                nullptr
+            )
+            {
+                continue;
+            }
+
+            if (
+                address->Address.lpSockaddr->sa_family ==
+                AF_INET
+            )
+            {
+                hasIPv4 = true;
+                break;
+            }
+        }
+
+        if (!hasIPv4)
         {
             continue;
         }
 
         if (
-            adapter->FriendlyName == nullptr
+            adapter->FriendlyName !=
+            nullptr
         )
         {
-            continue;
+            return wideToString(
+                adapter->FriendlyName
+            );
         }
 
-        return wideToString(
-            adapter->FriendlyName
-        );
+        /*
+         * Fallback to adapter description.
+         */
+        if (
+            adapter->Description !=
+            nullptr
+        )
+        {
+            return wideToString(
+                adapter->Description
+            );
+        }
     }
 
     return {};
 }
 
 
+/*
+ * ------------------------------------------------------------
+ * Network status availability
+ * ------------------------------------------------------------
+ *
+ * Windows provides the required network interface
+ * APIs through IP Helper API.
+ */
 bool networkStatusAvailable()
 {
+    MIB_IF_TABLE2* table = nullptr;
+
+    const DWORD result =
+        GetIfTable2(&table);
+
+    if (
+        result != NO_ERROR ||
+        table == nullptr
+    )
+    {
+        return false;
+    }
+
+    FreeMibTable(table);
+
     return true;
 }
 
 } // namespace slipnet::platform
 
-#endif
+#endif // _WIN32
